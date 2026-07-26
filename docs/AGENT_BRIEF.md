@@ -44,6 +44,43 @@ comparable, frame for frame, to a shipped AAA sports title.
   frame time. Capture 1–2 scenes at a time.
 - Add `dist-*` output to nothing — `.gitignore` already covers `dist*`.
 
+## Measuring your work
+
+Do not submit a frame you have only looked at. `docs/AAA_RUBRIC.md` states its
+criteria as numbers, and `tools/analyze.mjs` reports those numbers:
+
+```sh
+node tools/analyze.mjs shots/<yourname>                       # whole directory
+node tools/analyze.mjs shots/<yourname>/rim.png \
+    --region net=0.42,0.30,0.58,0.44 \
+    --region court=0.10,0.72,0.90,0.94                        # named regions
+node tools/analyze.mjs shots/<yourname>/floor.png \
+    --line penumbra=0.40,0.82,0.46,0.86                       # a profile across an edge
+```
+
+Regions and lines are fractional (0–1) frame coordinates, so a criterion written
+against the rubric's 1080×2340 reference frame applies at whatever size you
+captured. Naming two regions also prints the stop ratio between them, which is
+how you check §1.1's court-to-bowl figure directly.
+
+`FAIL` is a hard check. `WARN` is advisory — the measurement cannot fully
+separate that criterion from scene content, so confirm it by eye before acting
+on it. To make the §8 grade criteria exact, capture the `flatfield` scene:
+
+```sh
+node tools/capture.mjs --dist dist-<yourname> --port <yourport> \
+    --dir shots/<yourname> --scenes gameplay,flatfield
+```
+
+It runs the post chain over a uniform field, so anything that is not flat in the
+result is something the stack did. Vignette, grain and chromatic aberration are
+then measured exactly rather than guessed at.
+
+Passing every automated check means the frame is not *broken*. It does not mean
+it looks like the target — that is what `docs/CRITIC_PROTOCOL.md` is for, and a
+reviewer following it will be looking for the reason your work is not good
+enough yet.
+
 ## The visual target, concretely
 
 What makes a 2K frame read as 2K, in rough order of impact:
@@ -79,4 +116,13 @@ What makes a 2K frame read as 2K, in rough order of impact:
 | `src/game/` | Rules, possession, shooting, AI |
 | `src/ui/` | HUD and controls |
 | `src/audio/` | Procedural sound |
-| `tools/` | Screenshot / capture harness |
+| `src/dev/` | Development-only hooks (the flat-field test pattern) |
+| `tools/` | Capture harness, frame analyser, blind comparison sheets |
+
+## Documents
+
+| Path | What it is for |
+|---|---|
+| `docs/AGENT_BRIEF.md` | This file — how to work here |
+| `docs/AAA_RUBRIC.md` | What the target looks like, stated as numbers |
+| `docs/CRITIC_PROTOCOL.md` | How work is reviewed, scored and sent back |

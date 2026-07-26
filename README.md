@@ -64,23 +64,53 @@ struggling device gets softer pixels rather than a visible downgrade mid-play.
 | `src/game/` | Rules, possession, shooting, AI |
 | `src/ui/` | HUD and touch controls |
 | `src/audio/` | Procedural synthesis |
-| `tools/` | Playwright capture harness for the visual review loop |
+| `src/dev/` | Development-only hooks, such as the flat-field test pattern |
+| `tools/` | Capture harness, frame analyser, blind comparison sheets |
 
 ## The visual review loop
 
-Quality here is verified by looking, not by asserting. `tools/capture.mjs` boots
-the production bundle in a portrait phone viewport, drives the game into a set
-of standard framings and writes PNGs:
+Quality is verified by looking *and* by measuring, in that order.
+
+**Capture.** `tools/capture.mjs` boots the production bundle in a portrait phone
+viewport, drives the game into a set of standard framings and writes PNGs:
 
 ```sh
 npm run build
 node tools/capture.mjs --dir shots/round1 --quality high
 ```
 
-Scenes: `gameplay`, `arena`, `rim`, `closeup`, `floor`, `shot`, `swish`, `dunk`.
+Scenes: `gameplay`, `arena`, `rim`, `closeup`, `floor`, `shot`, `swish`, `dunk`,
+and `flatfield`.
 
-`docs/AAA_RUBRIC.md` is the standard those frames are graded against, and
-`docs/AGENT_BRIEF.md` is the brief every contributor works from.
+**Measure.** `docs/AAA_RUBRIC.md` states its criteria as numbers — luminance
+ranges, stop ratios, hue angles, pixel widths at a stated reference resolution —
+and `tools/analyze.mjs` reports them:
+
+```sh
+node tools/analyze.mjs shots/round1
+node tools/analyze.mjs shots/round1/rim.png --region net=0.42,0.30,0.58,0.44
+```
+
+Regions and line profiles are given in fractional frame coordinates, so a
+criterion written against the reference frame applies at any capture size.
+Checks the measurement cannot separate from scene content report `WARN` rather
+than `FAIL`; capturing the `flatfield` scene, which runs the post chain over a
+uniform field, turns the grade criteria into exact measurements.
+
+**Compare.** `tools/blind.mjs` builds a side-by-side sheet of two frames in a
+seeded random order with the answer key written outside the repository, so a
+reviewer judging whether an iteration improved on the last one cannot be swayed
+by knowing which is newer.
+
+```sh
+node tools/blind.mjs shots/round1/rim.png shots/round2/rim.png \
+    --out shots/compare/rim.png --key "$SCRATCH/rim.key.json"
+```
+
+**Judge.** `docs/CRITIC_PROTOCOL.md` sets out how a frame is scored, what a
+passing verdict requires, and what a review has to return. Its scale is anchored
+so that a 9 means a knowledgeable observer could not pick our frame out of a
+blind pair against the real thing.
 
 Note that the capture harness rasterises in software, so the frame times it
 reports are not representative of a real device. Judge pixels from captures and
