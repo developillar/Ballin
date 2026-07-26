@@ -134,6 +134,27 @@ export const RULES = {
   streetTarget: 21,
 } as const;
 
+/**
+ * Shot release timing.
+ *
+ * Lives here because three places have to agree on it and cannot import each
+ * other: the gameplay code that scores a release, the HUD that draws the green
+ * window, and the stylesheet that positions it. When those drift, the window is
+ * drawn somewhere other than where it actually is, and the player is being lied
+ * to by the interface — the worst possible bug in a timing mechanic.
+ *
+ * `src/ui/hudStyle.ts` positions `.meter .window` from these values; if you
+ * change them, change the percentages there to match.
+ */
+export const SHOT = {
+  /** Meter position, 0..1, where the release is perfect. */
+  windowCentre: 0.84,
+  /** Half-width of the perfect window, in meter units. */
+  windowHalf: 0.06,
+  /** Seconds for the meter to travel bottom to top. */
+  chargeSeconds: 0.62,
+} as const;
+
 /** Signed X position of a basket. side = 1 → +X baseline. */
 export function basketX(side: 1 | -1): number {
   return side * (COURT.halfLength - COURT.basketFromBaseline);

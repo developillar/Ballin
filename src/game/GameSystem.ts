@@ -7,7 +7,7 @@
 
 import { Vector3 } from 'three';
 import type { Engine, System } from '../core/Engine';
-import { BALL, HOOP, RULES, basketX } from '../core/Constants';
+import { BALL, HOOP, RULES, SHOT, basketX } from '../core/Constants';
 import type { BallSystem } from '../physics/BallSystem';
 import { clamp01 } from '../core/MathX';
 
@@ -65,7 +65,7 @@ export class GameSystem implements System {
       this.shotMeter = 0;
     }
     if (this.shotCharging) {
-      this.shotMeter = clamp01(this.shotMeter + dt / 0.62);
+      this.shotMeter = clamp01(this.shotMeter + dt / SHOT.chargeSeconds);
     }
     if (shoot.released && this.shotCharging) {
       this.shotCharging = false;
@@ -91,8 +91,12 @@ export class GameSystem implements System {
     const denom = 2 * cos * cos * (d * tan - dy);
     const speed = denom > 0 ? Math.sqrt((g * d * d) / denom) : 8;
 
-    // Release quality: 1.0 at the top of the meter, falling off either side.
-    const quality = 1 - Math.abs(meter - 0.86) / 0.86;
+    // Release quality: 1.0 anywhere inside the green window the HUD draws,
+    // falling off linearly outside it. Scoring against a single point rather
+    // than the window would mean the interface promises a band that gameplay
+    // does not honour.
+    const offset = Math.abs(meter - SHOT.windowCentre);
+    const quality = offset <= SHOT.windowHalf ? 1 : 1 - (offset - SHOT.windowHalf) / (1 - SHOT.windowHalf);
     this.lastShotQuality = clamp01(quality);
     const err = (1 - this.lastShotQuality) * 0.09;
 
