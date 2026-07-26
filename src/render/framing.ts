@@ -44,6 +44,12 @@ export interface FramingRequest {
   /** Bounds on the solved ground distance. */
   minDistance: number;
   maxDistance: number;
+  /**
+   * Where between the two subjects the yaw aims: 0 is straight at `lower`, 1
+   * straight at `upper`. Defaults to halfway, which keeps both near the frame's
+   * vertical centreline when the camera is offset laterally.
+   */
+  yawBias?: number;
 }
 
 export interface FramingResult {
@@ -58,6 +64,7 @@ export interface FramingResult {
 const _toUpper = new Vector3();
 const _toLower = new Vector3();
 const _eye = new Vector3();
+const _aim = new Vector3();
 
 /**
  * NDC y for a point at angle `theta` above the camera's forward axis, and its
@@ -125,9 +132,17 @@ export function solveFraming(req: FramingRequest): FramingResult {
   const lowerElevation = elevation(position, req.lower, _toLower);
   const pitch = lowerElevation - Math.atan(tanLower);
 
+  // Yaw aims between the two subjects, not at the lower one.
+  //
+  // The camera is generally offset laterally from the line through both
+  // subjects — a dead straight-on view reads as a training-mode camera — and
+  // aiming straight at the lower subject then swings the upper one out toward
+  // the frame edge. In a portrait frame that is enough to push the basket half
+  // out of shot. Splitting the difference keeps both near the centreline.
+  _aim.copy(req.lower).lerp(req.upper, req.yawBias ?? 0.5).setY(0);
   const horizontal = Math.hypot(req.lower.x - position.x, req.lower.z - position.z);
   const lookAt = new Vector3()
-    .copy(req.lower)
+    .copy(_aim)
     .sub(position)
     .setY(0)
     .normalize()

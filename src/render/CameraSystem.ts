@@ -263,16 +263,23 @@ export class CameraSystem implements System {
     this.back.copy(this.subject).sub(this.rimPoint).setY(0);
     if (this.back.lengthSq() < 1e-4) this.back.set(-1, 0, 0);
     this.back.normalize();
-    // Offset the line a little toward the near sideline so the frame is not a
-    // dead-flat straight-on view, which reads as a training-mode camera.
-    this.back.z += 0.34;
-    this.back.normalize();
 
     // Solve against the subject's feet, not the ball: the composition rules are
     // written about where the handler stands.
     this.nearHard.set(this.subject.x, 0, this.subject.z);
-
     const toRim = Math.hypot(this.nearHard.x - this.rimPoint.x, this.nearHard.z - this.rimPoint.z);
+
+    // Offset the camera toward the near sideline so the frame is not a
+    // dead-flat straight-on view, which reads as a training-mode camera.
+    //
+    // The offset has to shrink as the handler gets further from the basket. A
+    // fixed offset spreads the two subjects further apart in azimuth the longer
+    // the sightline gets, and in a portrait frame that walked the rim clean off
+    // the right edge from about nine metres out. Scaling it by 4/distance holds
+    // the rim between 53% and 60% of frame width across the whole range.
+    this.back.z += 0.34 * Math.min(1, 4 / Math.max(1, toRim));
+    this.back.normalize();
+
     const rimFraction = lerp(mode.rimNear, mode.rimFar, invLerp(RIM_EASE_NEAR, RIM_EASE_FAR, toRim));
 
     const result = solveFraming({
