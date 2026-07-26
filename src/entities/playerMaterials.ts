@@ -58,6 +58,9 @@ uniform float uSss;
 uniform vec3 uSubsurface;
 uniform float uSweatRough;
 uniform float uTranslucency;
+// The packed skin data map again under our own name: three declares the
+// roughnessMap sampler after the lighting chunks, so it is not in scope here.
+uniform sampler2D uSkinData;
 
 // Replaces the physical direct-lighting response for skin. The base response is
 // untouched — this adds only what a dielectric BRDF cannot express.
@@ -91,8 +94,8 @@ void RE_Direct_Skin(
     directLight.color * uSubsurface * ( trans * vFlesh.y * uTranslucency );
 
   // --- Sweat: the sharp second specular lobe -----------------------------
-  #ifdef USE_ROUGHNESSMAP
-    float beads = texture2D( roughnessMap, vMapUv ).r;
+  #ifdef USE_MAP
+    float beads = texture2D( uSkinData, vMapUv ).r;
   #else
     float beads = 0.5;
   #endif
@@ -109,7 +112,7 @@ void RE_Direct_Skin(
     float D = a2 / ( 3.141592 * den * den );
     float V = 0.5 / ( nl + nv );
     float F = 0.035 + 0.965 * pow( 1.0 - voh, 5.0 );
-    reflectedLight.directSpecular += directLight.color * ( D * V * F * lam * wet * 0.85 );
+    reflectedLight.directSpecular += directLight.color * ( D * V * F * lam * wet * 0.3 );
   }
 }
 
@@ -135,11 +138,11 @@ export function makeSkinMaterial(maps: SkinMaps, tone: SkinTone): SkinMaterial {
     vertexColors: true,
     // The broad, low, grazing-angle sheen of skin oil. Under the sweat lobe it
     // gives the two-population specular the rubric asks for.
-    sheen: 0.3,
-    sheenRoughness: 0.55,
+    sheen: 0.16,
+    sheenRoughness: 0.58,
     sheenColor: new Color(0xffd8bc),
     specularIntensity: tone.specular,
-    envMapIntensity: 0.85,
+    envMapIntensity: 0.5,
     side: FrontSide,
   }) as SkinMaterial;
 
@@ -153,6 +156,7 @@ export function makeSkinMaterial(maps: SkinMaps, tone: SkinTone): SkinMaterial {
       value: new Color(tone.subsurface).convertSRGBToLinear(),
     };
     shader.uniforms.uSweatRough = { value: 0.11 };
+    shader.uniforms.uSkinData = { value: maps.data };
     shader.uniforms.uTranslucency = { value: 0.5 };
 
     shader.vertexShader = shader.vertexShader
@@ -217,15 +221,17 @@ export function makeHairMaterial(maps: HairMaps, colour: number): MeshPhysicalMa
   const m = new MeshPhysicalMaterial({
     map: maps.shade,
     alphaMap: maps.alpha,
-    alphaTest: 0.45,
+    alphaTest: 0.36,
     color: new Color(colour).convertSRGBToLinear(),
-    roughness: 0.44,
+    roughness: 0.62,
     metalness: 0,
-    sheen: 0.6,
-    sheenRoughness: 0.35,
-    sheenColor: new Color(0xbfa98c),
-    specularIntensity: 0.55,
-    envMapIntensity: 0.9,
+    // A banded, anisotropic-looking highlight along the strand flow, kept low
+    // enough that hair does not read as moulded plastic.
+    sheen: 0.4,
+    sheenRoughness: 0.42,
+    sheenColor: new Color(0x8e7a63),
+    specularIntensity: 0.4,
+    envMapIntensity: 0.45,
     side: DoubleSide,
   });
   m.transparent = false;

@@ -26,8 +26,13 @@
 import { FT, IN } from '../core/Constants';
 import { clamp01, fbm2, makeRng, smootherstep, valueNoise2 } from '../core/MathX';
 
-/** 2-1/4 in face width — the NBA norm (rule of thumb: 51–60 mm). */
-export const BOARD_WIDTH = 2.25 * IN;
+/**
+ * 2-1/8 in face width = 53.98 mm. The milled norm is 2 to 2-1/4 in; sitting in
+ * the middle of it puts a board at ~38 px at the FLOOR framing's near edge
+ * (~700 px/m at the rubric's reference frame), dead centre of the 36–42 px
+ * band, and puts 27–30 boards across the visible near floor rather than 24.
+ */
+export const BOARD_WIDTH = 2.125 * IN;
 /** Boards per tile. Keeps the tile's V wrap exactly on a seam. */
 export const TILE_BOARDS = 16;
 /** 16 ft along the grain: long enough for 2–3 butt joints per strip. */
@@ -75,6 +80,8 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
   // Anything finer sits on Nyquist and mips straight into mud, so the pitch is
   // also floored at three texels for the low tiers.
   const minPitch = mz * 3;
+  /** Ray-fleck frequency capped at one noise cell per ~3.2 texels along U. */
+  const rayFx = 1 / (mx * 3.2);
 
   const boards: BoardSpec[] = [];
   for (let b = 0; b < TILE_BOARDS; b++) {
@@ -89,7 +96,9 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
       cathedral: rng() < 0.13,
       cathCentre: 0.3 + rng() * 0.4,
       cathPhase: rng() * 6.28,
-      pitch: Math.max(minPitch, 0.0023 + rng() * 0.0015),
+      // 16–21 growth rings across a 54 mm face. Hard maple is tight-grained;
+      // anything wider reads as oak and instantly as a stock texture.
+      pitch: Math.max(minPitch, 0.0021 + rng() * 0.0012),
       joints,
       streakAt: rng(),
       streakK: rng() < 0.3 ? 0.5 + rng() * 0.5 : 0,
@@ -149,7 +158,7 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
         valueNoise2(t * 2.31 + 7.7, x * 1.15, spec.seed + 313) * 0.25 +
         valueNoise2(t * 0.37, x * 0.19, spec.seed + 77) * 0.2;
       // Hard maple is tight and light: thin late-wood lines on a pale field.
-      let dark = Math.pow(clamp01((g - 0.46) / 0.5), 1.75);
+      let dark = Math.pow(clamp01((g - 0.46) / 0.55), 1.6);
 
       // Mineral streak — a long darker vein a few boards in ten carry.
       if (spec.streakK > 0) {
@@ -159,11 +168,18 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
       }
 
       // Medullary rays: short pale flecks running across the ring lines.
-      const ray = valueNoise2(x * 480, z * 150, spec.seed + 61);
-      const rayK = Math.pow(clamp01((ray - 0.74) / 0.26), 2) * 0.5;
+      //
+      // The tile is deliberately anisotropic — ~4.8 mm per texel along the
+      // grain against ~0.85 mm across it — so a ray frequency chosen in metres
+      // sits far above Nyquist on the U axis and beats against the sample grid.
+      // That produced an evenly spaced bright stipple that latched onto the
+      // strip seams and read as machine stitching down every board. The
+      // frequency is therefore pinned to the texel pitch, not to the world.
+      const ray = valueNoise2(x * rayFx, z * 150, spec.seed + 61);
+      const rayK = Math.pow(clamp01((ray - 0.76) / 0.24), 2) * 0.34;
 
-      let h = -dark * 0.00012 + rayK * 0.00003;
-      let ton = 0.5 - dark * 0.15 + rayK * 0.04;
+      let h = -dark * 0.00012 + rayK * 0.00002;
+      let ton = 0.5 - dark * 0.18 + rayK * 0.03;
 
       // --- knots ------------------------------------------------------------
       for (const k of knots) {
@@ -184,17 +200,21 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
       }
 
       // --- strip seam -------------------------------------------------------
-      // A tight channel with a shallow eased shoulder either side: the shoulder
-      // is what throws the bright lip when a bank rakes across the floor.
+      // A tight channel with a shallow eased shoulder either side. The shoulder
+      // throws a bright lip when a bank rakes across the floor — but the coat
+      // is glossy enough that an over-deep bevel makes that lip *outrun* the
+      // tonal darkening, and the seam inverts into a bright line down the
+      // board, which is the opposite of what §2.1 asks for. The relief is
+      // therefore shallow and the seam is carried mostly by tone.
       if (dEdge < 0.0034) {
         const shoulder = 1 - smootherstep(dEdge / 0.0034);
-        h -= 0.00026 * shoulder * shoulder;
-        ton -= 0.07 * shoulder;
+        h -= 0.00013 * shoulder * shoulder;
+        ton -= 0.09 * shoulder;
       }
       if (dEdge < 0.0011) {
         const core = 1 - dEdge / 0.0011;
-        h -= 0.00058 * core;
-        ton -= 0.3 * core * core;
+        h -= 0.0003 * core;
+        ton -= 0.34 * core * core;
       }
 
       // --- butt joints ------------------------------------------------------
@@ -202,12 +222,12 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
         const d = Math.abs(x - jx);
         if (d > 0.004) continue;
         const shoulder = 1 - smootherstep(d / 0.004);
-        h -= 0.0002 * shoulder * shoulder;
-        ton -= 0.055 * shoulder;
+        h -= 0.0001 * shoulder * shoulder;
+        ton -= 0.07 * shoulder;
         if (d < 0.0011) {
           const core = 1 - d / 0.0011;
-          h -= 0.00048 * core;
-          ton -= 0.26 * core * core;
+          h -= 0.00025 * core;
+          ton -= 0.3 * core * core;
         }
       }
 

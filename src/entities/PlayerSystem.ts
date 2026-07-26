@@ -177,6 +177,13 @@ interface BallLike {
     owner: { kind: string };
     resting: boolean;
   };
+  /**
+   * The ball's render transform. It is written directly after `hold()` because
+   * the ball system interpolates its mesh between the last two *simulated*
+   * positions, and a held ball never simulates — so the mesh would otherwise
+   * lerp between the hand and wherever the ball last came to rest.
+   */
+  mesh?: { position: Vector3 };
   hold(player: number, at: Vector3): void;
 }
 
@@ -282,7 +289,7 @@ export class PlayerSystem implements System {
         const at =
           team === 0
             ? new Vector3(basketX(1) + fx, 0, fz)
-            : new Vector3(basketX(1) + fx + 1.45, 0, fz * 0.92 + 0.35);
+            : new Vector3(basketX(1) + fx + 1.6, 0, fz * 0.92 - 0.55);
 
         const rig = this.spawn({
           team,
@@ -504,6 +511,7 @@ export class PlayerSystem implements System {
     // out of a live shot.
     if (handler && ballState && ballState.owner.kind !== 'shot') {
       this.ball?.hold(handler.index, _ballPoint);
+      this.ball?.mesh?.position.copy(_ballPoint);
     }
 
     void engine;
@@ -523,10 +531,13 @@ export class PlayerSystem implements System {
     const fz = cos;
     const rx = cos;
     const rz = -sin;
+    // Far enough off the chest that the elbows stay outside the jersey — a
+    // ball tucked against the sternum drives the upper arm straight through
+    // the cloth, and no amount of skinning hides that.
     out.set(
-      p.position.x + fx * 0.3 + rx * 0.13 * s,
-      p.position.y + p.jumpY + p.height * 0.6,
-      p.position.z + fz * 0.3 + rz * 0.13 * s,
+      p.position.x + fx * 0.38 + rx * 0.16 * s,
+      p.position.y + p.jumpY + p.height * 0.615,
+      p.position.z + fz * 0.38 + rz * 0.16 * s,
     );
     return out;
   }

@@ -170,54 +170,76 @@ export function solveTwoBoneIK(
   _target.copy(_pRoot).addScaledVector(_d, dist);
 
   // --- Interior (bend) angle ---------------------------------------------
+  //
+  // Two passes. The bend rotation is only *exactly* right when its axis is
+  // perpendicular to both segments, and when the chain starts near-straight
+  // (an A-pose arm is 3° off straight) the axis has to be reconstructed from
+  // the pole and is slightly off. One pass leaves ~15 mm; two converge to the
+  // float noise floor. This matters: a wrist that is 15 mm from where the ball
+  // hold asked for it is a visible gap between fingers and leather.
   const denom = 2 * lenUpper * lenLower;
   const wantMid = Math.acos(
     clamp((lenUpper * lenUpper + lenLower * lenLower - dist * dist) / denom, -1, 1),
   );
-  const curDist = _pRoot.distanceTo(_pTip);
-  const curMid = Math.acos(
-    clamp((lenUpper * lenUpper + lenLower * lenLower - curDist * curDist) / denom, -1, 1),
-  );
-
-  // Bend axis: normal to the plane the chain currently occupies. Near full
-  // extension that plane is numerically meaningless, so fall back to the pole —
-  // this is the wrap-around case where a naive solver folds the joint into a
-  // random direction and pops.
-  _a.copy(_pMid).sub(_pRoot);
-  _b.copy(_pTip).sub(_pMid);
-  _axis.copy(_a).cross(_b);
-  const straightness = _axis.length() / Math.max(1e-9, _a.length() * _b.length());
-  if (straightness < 0.06) {
-    _c.copy(pole).sub(_pRoot);
-    _axis.copy(_c).cross(_d);
-    if (_axis.lengthSq() < 1e-10) {
-      _axis.copy(_d).cross(UP);
-      if (_axis.lengthSq() < 1e-10) _axis.set(1, 0, 0);
+  const passes = weight > 0.9 ? 2 : 1;
+  for (let pass = 0; pass < passes; pass++) {
+    if (pass > 0) {
+      root.updateWorldMatrix(true, false);
+      mid.updateWorldMatrix(false, false);
+      tip.updateWorldMatrix(false, false);
+      boneWorld(root, _pRoot);
+      boneWorld(mid, _pMid);
+      boneWorld(tip, _pTip);
+      if (_pTip.distanceTo(_target) < 1e-4) break;
     }
-  }
-  _axis.normalize();
+    const curDist = _pRoot.distanceTo(_pTip);
+    const curMid = Math.acos(
+      clamp((lenUpper * lenUpper + lenLower * lenLower - curDist * curDist) / denom, -1, 1),
+    );
 
-  // Sign: `_axis` is (root→mid) × (mid→tip). A *positive* rotation about it
-  // opens the angle between the two segments, which *closes* the interior angle
-  // at the mid joint — hence `cur − want`, not `want − cur`. Getting this
-  // backwards leaves the chain a few centimetres short and, worse, makes the
-  // solver diverge under iteration instead of converging.
-  applyWorldDelta(mid, _q.setFromAxisAngle(_axis, (curMid - wantMid) * weight));
+    // Bend axis: normal to the plane the chain currently occupies. Near full
+    // extension that plane is numerically meaningless, so fall back to the
+    // pole — this is the wrap-around case where a naive solver folds the joint
+    // into a random direction and pops.
+    _a.copy(_pMid).sub(_pRoot);
+    _b.copy(_pTip).sub(_pMid);
+    _axis.copy(_a).cross(_b);
+    const straightness = _axis.length() / Math.max(1e-9, _a.length() * _b.length());
+    if (straightness < 0.06) {
+      // The fallback axis must still be exactly perpendicular to the upper
+      // segment, or the rotation does not change the interior angle by the
+      // amount the law of cosines just asked for and the chain lands short.
+      _c.copy(pole).sub(_pRoot);
+      _axis.copy(_c).cross(_a);
+      if (_axis.lengthSq() < 1e-10) {
+        _axis.copy(UP).cross(_a);
+        if (_axis.lengthSq() < 1e-10) _axis.set(1, 0, 0);
+      }
+    }
+    _axis.normalize();
 
-  // --- Swing the chain so the tip lands on the target ----------------------
-  root.updateWorldMatrix(true, false);
-  mid.updateWorldMatrix(false, false);
-  tip.updateWorldMatrix(false, false);
-  boneWorld(root, _pRoot);
-  boneWorld(tip, _pTip);
+    // Sign: `_axis` is (root→mid) × (mid→tip). A *positive* rotation about it
+    // opens the angle between the two segments, which *closes* the interior
+    // angle at the mid joint — hence `cur − want`, not `want − cur`. Getting
+    // this backwards leaves the chain short and makes the solver diverge under
+    // iteration instead of converging.
+    applyWorldDelta(mid, _q.setFromAxisAngle(_axis, (curMid - wantMid) * weight));
 
-  _a.copy(_pTip).sub(_pRoot);
-  if (_a.lengthSq() > 1e-10) {
-    _a.normalize();
-    _b.copy(_target).sub(_pRoot).normalize();
-    _q.setFromUnitVectors(_a, _b);
-    if (weight < 1) _q.slerp(_qi.identity(), 1 - weight);
-    applyWorldDelta(root, _q);
+    // --- Swing the chain so the tip lands on the target -------------------
+    root.updateWorldMatrix(true, false);
+    mid.updateWorldMatrix(false, false);
+    tip.updateWorldMatrix(false, false);
+    boneWorld(root, _pRoot);
+    boneWorld(tip, _pTip);
+
+    _a.copy(_pTip).sub(_pRoot);
+    if (_a.lengthSq() > 1e-10) {
+      _a.normalize();
+      _b.copy(_target).sub(_pRoot).normalize();
+      _q.setFromUnitVectors(_a, _b);
+      if (weight < 1) _q.slerp(_qi.identity(), 1 - weight);
+      applyWorldDelta(root, _q);
+    }
   }
 
   // --- Roll the chain around the root→tip axis to satisfy the pole ---------
@@ -314,6 +336,12 @@ export interface FootPlant {
   normal: Vector3;
   /** 0 = airborne (ignore), 1 = fully planted. */
   weight: number;
+  /**
+   * How hard to flatten the sole against `normal`. Separate from `weight`
+   * because a foot rolling up onto its toe is still fully planted but must not
+   * have its sole forced flat.
+   */
+  soleWeight?: number;
 }
 
 export function solveLegPlant(
@@ -340,13 +368,14 @@ export function solveLegPlant(
   solveTwoBoneIK(thigh, shin, foot, plant.target, _pole, plant.weight, HINGE.knee);
 
   // Roll the ankle so the sole matches the floor normal.
-  if (plant.normal.lengthSq() > 1e-6) {
+  const sole = plant.soleWeight ?? plant.weight;
+  if (sole > 0.001 && plant.normal.lengthSq() > 1e-6) {
     foot.updateWorldMatrix(true, false);
     boneWorldQuat(foot, _q);
     _c.set(0, -1, 0).applyQuaternion(_q).normalize();
     _d.copy(plant.normal).normalize().negate();
     _q2.setFromUnitVectors(_c, _d);
-    if (plant.weight < 1) _q2.slerp(_qi.identity(), 1 - plant.weight);
+    if (sole < 1) _q2.slerp(_qi.identity(), 1 - sole);
     applyWorldDelta(foot, _q2);
   }
 }

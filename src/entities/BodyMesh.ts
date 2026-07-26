@@ -284,12 +284,12 @@ const SIGMA: Partial<Record<BoneName, number>> = {
   upperChest: 0.05,
   neck: 0.032,
   head: 0.048,
-  clavicleL: 0.038,
-  clavicleR: 0.038,
-  upperArmL: 0.036,
-  upperArmR: 0.036,
-  foreArmL: 0.03,
-  foreArmR: 0.03,
+  clavicleL: 0.03,
+  clavicleR: 0.03,
+  upperArmL: 0.027,
+  upperArmR: 0.027,
+  foreArmL: 0.025,
+  foreArmR: 0.025,
   handL: 0.024,
   handR: 0.024,
   thighL: 0.052,
@@ -451,13 +451,13 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
   };
 
   // --- Torso -------------------------------------------------------------
-  seg(I.hips, I.spine, [[0, 0.163], [1, 0.14]], [[0, 0.118], [1, 0.104]], 3.0, 0.05, 'torso');
-  seg(I.spine, I.chest, [[0, 0.14], [1, 0.157]], [[0, 0.104], [1, 0.115]], 3.2, 0.05, 'torso');
+  seg(I.hips, I.spine, [[0, 0.168], [1, 0.128]], [[0, 0.112], [1, 0.1]], 3.0, 0.05, 'torso');
+  seg(I.spine, I.chest, [[0, 0.128], [1, 0.145]], [[0, 0.1], [1, 0.108]], 3.2, 0.05, 'torso');
   seg(
     I.chest,
     I.upperChest,
-    [[0, 0.157], [1, 0.182]],
-    [[0, 0.115], [1, 0.129]],
+    [[0, 0.145], [1, 0.166]],
+    [[0, 0.108], [1, 0.122]],
     3.4,
     0.05,
     'torso',
@@ -468,8 +468,8 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
   seg(
     I.upperChest,
     I.neck,
-    [[0, 0.182], [0.45, 0.148], [1, 0.076]],
-    [[0, 0.129], [0.45, 0.112], [1, 0.072]],
+    [[0, 0.166], [0.45, 0.14], [1, 0.076]],
+    [[0, 0.122], [0.45, 0.106], [1, 0.07]],
     3.0,
     0.055,
     'torso',
@@ -479,10 +479,10 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
 
   prims.push(
     ballPrim(
-      P[I.hips].clone().add(new Vector3(0, -0.028 * H, -m(0.055))),
-      m(0.166),
-      m(0.115),
-      m(0.1),
+      P[I.hips].clone().add(new Vector3(0, -0.028 * H, -m(0.05))),
+      m(0.155),
+      m(0.11),
+      m(0.095),
       0.05 * S,
       BASIS,
       'torso',
@@ -492,10 +492,10 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
     // Pectoral shelf.
     prims.push(
       ballPrim(
-        P[I.upperChest].clone().add(new Vector3(sgn * ms(0.078), -0.018 * H, ms(0.07))),
-        ms(0.086),
-        m(0.058),
-        m(0.05),
+        P[I.upperChest].clone().add(new Vector3(sgn * ms(0.072), -0.018 * H, ms(0.062))),
+        ms(0.078),
+        m(0.055),
+        m(0.048),
         0.035 * S,
         BASIS,
         'torso',
@@ -504,10 +504,10 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
     // Latissimus: a flat wing running from the armpit down to the waist.
     prims.push(
       ballPrim(
-        P[I.chest].clone().add(new Vector3(sgn * ms(0.14), 0.028 * H, -m(0.012))),
-        ms(0.05),
-        m(0.135),
-        m(0.106),
+        P[I.chest].clone().add(new Vector3(sgn * ms(0.128), 0.028 * H, -m(0.012))),
+        ms(0.045),
+        m(0.13),
+        m(0.1),
         0.05 * S,
         BASIS,
         'torso',
@@ -516,10 +516,10 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
     // Trapezius ridge from the neck out to the acromion.
     prims.push(
       ballPrim(
-        P[I.neck].clone().add(new Vector3(sgn * ms(0.085), -0.014 * H, -m(0.018))),
-        ms(0.112),
-        m(0.05),
-        m(0.072),
+        P[I.neck].clone().add(new Vector3(sgn * ms(0.08), -0.014 * H, -m(0.018))),
+        ms(0.1),
+        m(0.048),
+        m(0.068),
         0.05 * S,
         BASIS,
         'torso',
@@ -532,9 +532,9 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
       ballPrim(
         P[up].clone().add(new Vector3(-sgn * ms(0.016), 0.012 * H, 0)),
         ms(0.058),
-        m(0.082),
-        m(0.064),
-        0.045 * S,
+        m(0.068),
+        m(0.062),
+        0.05 * S,
         BASIS,
         'torso',
       ),
@@ -552,50 +552,57 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
   }
 
   // --- Head ---------------------------------------------------------------
+  // A head is ~0.25 m from chin to crown on a 1.98 m frame, which is the
+  // 7.6–8.2 heads-tall proportion. These are RADII, so the cranium is
+  // 0.082 x 0.128 x 0.104 m — anything larger reads instantly as a bobblehead.
   const headY = P[I.head].y;
-  const cranium = new Vector3(0, lerp(headY, 0.995 * H, 0.46), 0.004 * H);
-  prims.push(ballPrim(cranium, 0.079 * H, 0.114 * H, 0.098 * H, 0.03 * S, BASIS, 'head'));
+  const cranium = new Vector3(0, 0.933 * H, 0.003 * H);
+  prims.push(ballPrim(cranium, 0.041 * H, 0.064 * H, 0.053 * H, 0.022 * S, BASIS, 'head'));
+  // Jaw and chin, tapering forward and down off the cranium.
   prims.push(
     ballPrim(
-      new Vector3(0, headY + 0.014 * H, 0.026 * H),
-      0.063 * H,
-      0.043 * H,
-      0.071 * H,
-      0.035 * S,
-      BASIS,
-      'head',
-    ),
-  );
-  prims.push(
-    ballPrim(
-      new Vector3(0, headY + 0.062 * H, 0.074 * H),
-      0.047 * H,
-      0.015 * H,
-      0.022 * H,
+      new Vector3(0, headY + 0.009 * H, 0.014 * H),
+      0.033 * H,
+      0.024 * H,
+      0.04 * H,
       0.022 * S,
       BASIS,
       'head',
     ),
   );
+  // Brow ridge.
   prims.push(
     ballPrim(
-      new Vector3(0, headY + 0.036 * H, 0.084 * H),
-      0.013 * H,
-      0.022 * H,
+      new Vector3(0, headY + 0.033 * H, 0.038 * H),
       0.026 * H,
-      0.012 * S,
+      0.008 * H,
+      0.013 * H,
+      0.014 * S,
       BASIS,
       'head',
     ),
   );
+  // Nose.
+  prims.push(
+    ballPrim(
+      new Vector3(0, headY + 0.021 * H, 0.045 * H),
+      0.007 * H,
+      0.013 * H,
+      0.014 * H,
+      0.008 * S,
+      BASIS,
+      'head',
+    ),
+  );
+  // Ears.
   for (const sgn of [1, -1]) {
     prims.push(
       ballPrim(
-        new Vector3(sgn * 0.075 * H, headY + 0.044 * H, -0.004 * H),
-        0.012 * H,
-        0.03 * H,
-        0.021 * H,
-        0.012 * S,
+        new Vector3(sgn * 0.04 * H, headY + 0.025 * H, -0.003 * H),
+        0.006 * H,
+        0.016 * H,
+        0.011 * H,
+        0.006 * S,
         BASIS,
         'head',
       ),
@@ -644,10 +651,10 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
     prims.push(
       slabPrim(
         P[ha].clone().addScaledVector(hw, m(0.05)),
-        m(0.047),
-        m(0.05),
-        m(0.017),
-        m(0.012),
+        m(0.042),
+        m(0.048),
+        m(0.022),
+        m(0.013),
         0.022 * S,
         handBasis,
         'arm',
@@ -655,11 +662,11 @@ function buildPrims(sk: BuiltSkeleton, shape: BodyShape): Prim[] {
     );
     prims.push(
       slabPrim(
-        P[ha].clone().addScaledVector(hw, m(0.132)),
-        m(0.045),
-        m(0.055),
-        m(0.013),
-        m(0.011),
+        P[ha].clone().addScaledVector(hw, m(0.126)),
+        m(0.04),
+        m(0.05),
+        m(0.019),
+        m(0.012),
         0.02 * S,
         handBasis,
         'arm',
@@ -999,6 +1006,32 @@ function fixWinding(raw: RawMesh): number[] {
 // Skinning
 // ---------------------------------------------------------------------------
 
+/**
+ * Garments must not be skinned to whatever bone happens to be nearest. A point
+ * on the front of the chest is very nearly as close to the upper-arm axis as to
+ * the sternum, so an unrestricted solve hands the jersey's chest panel to the
+ * arm — and the moment the arm moves, the body tears straight through the
+ * cloth. Each shell therefore declares the bones it is allowed to ride.
+ */
+function boneMask(names: readonly BoneName[]): Uint8Array {
+  const m = new Uint8Array(BONES.length);
+  for (const n of names) m[BONE_INDEX[n]] = 1;
+  return m;
+}
+
+const MASK_JERSEY = boneMask([
+  'hips',
+  'spine',
+  'chest',
+  'upperChest',
+  'neck',
+  'clavicleL',
+  'clavicleR',
+]);
+const MASK_SHORTS = boneMask(['hips', 'spine', 'thighL', 'thighR']);
+const MASK_SHOE = boneMask(['shinL', 'shinR', 'footL', 'footR', 'toeL', 'toeR']);
+const MASK_HAIR = boneMask(['head', 'neck']);
+
 const _dist = new Float64Array(BONES.length);
 const _score = new Float64Array(BONES.length);
 const _order = new Int32Array(BONES.length);
@@ -1018,10 +1051,11 @@ function skinWeights(
   z: number,
   outIdx: number[],
   outWt: number[],
+  allow: Uint8Array | null = null,
 ): number {
   let dmin = Infinity;
   for (let i = 0; i < segs.length; i++) {
-    if (i === ROOT) {
+    if (i === ROOT || (allow !== null && allow[i] === 0)) {
       _dist[i] = Infinity;
       continue;
     }
@@ -1091,6 +1125,8 @@ class MeshBuilder {
   si: number[] = [];
   sw: number[] = [];
   idx: number[] = [];
+  /** Bones the vertices pushed from here on are allowed to ride. */
+  mask: Uint8Array | null = null;
   private readonly bi: number[] = [0, 0, 0, 0];
   private readonly bw: number[] = [0, 0, 0, 0];
 
@@ -1102,7 +1138,7 @@ class MeshBuilder {
     const nl = Math.hypot(v.nx, v.ny, v.nz) || 1;
     this.nrm.push(v.nx / nl, v.ny / nl, v.nz / nl);
     this.uv.push(v.u, v.v);
-    skinWeights(this.segs, v.x, v.y, v.z, this.bi, this.bw);
+    skinWeights(this.segs, v.x, v.y, v.z, this.bi, this.bw, this.mask);
     this.si.push(this.bi[0], this.bi[1], this.bi[2], this.bi[3]);
     this.sw.push(this.bw[0], this.bw[1], this.bw[2], this.bw[3]);
     return id;
@@ -1267,11 +1303,11 @@ function finishBody(
       occ += (w * Math.max(0, d - s)) / d;
       w *= 0.62;
     }
-    const ao = clamp01(1 - occ * 0.4);
+    const ao = clamp01(1 - occ * 0.34);
 
     const mottle = fbm2(x * 6 + freckle, y * 6, 3, 2.1, 0.5, seed) - 0.5;
     const warm = part === 'hand' ? 0.7 : part === 'foreArm' ? 0.28 : part === 'head' ? 0.3 : 0;
-    const shade = 0.6 + 0.4 * ao;
+    const shade = 0.8 + 0.2 * ao;
     col[i * 3] = shade * (1 + mottle * 0.06 + warm * 0.05);
     col[i * 3 + 1] = shade * (1 + mottle * 0.04 - warm * 0.015);
     col[i * 3 + 2] = shade * (1 + mottle * 0.03 - warm * 0.032);
@@ -1375,21 +1411,27 @@ function buildKit(
   const H = sk.height;
   const S = H / 1.98;
   const mb = new MeshBuilder(segs);
-  const around = [22, 30, 38][detail];
+  mb.mask = MASK_JERSEY;
+  const around = [24, 34, 44][detail];
   const downJ = [10, 13, 16][detail];
   const hemY = 0.474 * H;
 
   // Top edge of the jersey, by angle from the chest. The dips at 1.13 and 2.02
   // rad are the front and back of each armhole; between them the cloth rides
   // over the deltoid as a shoulder strap.
+  // A tank cut: scooped at the throat, full over the shoulder, scooped again
+  // at the nape. The armhole is not a hole in this surface — the arm simply
+  // emerges below the deltoid, which the radius solve wraps as a sleeve cap.
+  // Cutting a lateral hole out of a radial loft puts the notch at the same
+  // angle as the shoulder strap, which is what produced the V-front vest.
   const TOP: ReadonlyArray<readonly [number, number]> = [
-    [0, 0.793],
-    [0.55, 0.828],
-    [1.13, 0.703],
-    [1.57, 0.826],
-    [2.02, 0.706],
-    [2.6, 0.836],
-    [Math.PI, 0.842],
+    [0, 0.808],
+    [0.45, 0.826],
+    [1.0, 0.842],
+    [1.57, 0.846],
+    [2.2, 0.843],
+    [2.75, 0.83],
+    [Math.PI, 0.818],
   ];
   const topAt = (a: number): number => {
     for (let i = 1; i < TOP.length; i++) {
@@ -1403,23 +1445,68 @@ function buildKit(
     return TOP[TOP.length - 1][1] * H;
   };
 
+  // Radius is solved on a grid and then relaxed vertically before any vertex
+  // is emitted. Without that, the ring that still finds the deltoid and the
+  // ring just below it that finds the ribcage differ by 70 mm and the cloth
+  // gets a hard crease across the shoulder.
+  const rad: number[][] = [];
+  const ys: number[][] = [];
+  const dirs: Array<[number, number]> = [];
+  for (let ui = 0; ui < around; ui++) {
+    const theta = (ui / around - 0.5) * Math.PI * 2;
+    // +u must run toward +X so canvas text reads left-to-right on the chest.
+    dirs.push([Math.sin(theta), Math.cos(theta)]);
+  }
+  for (let vi = 0; vi <= downJ; vi++) {
+    const v = vi / downJ;
+    const rr: number[] = [];
+    const yy: number[] = [];
+    for (let ui = 0; ui < around; ui++) {
+      const u = ui / around;
+      const theta = (u - 0.5) * Math.PI * 2;
+      const [dirX, dirZ] = dirs[ui];
+      const y = lerp(topAt(Math.abs(theta)), hemY, v);
+      const rBody = surfaceRadius(dressForm, y, 0, 0, dirX, dirZ, 0.02 * S, 0.34 * S);
+      const gap = lerp(0.011, 0.034, Math.pow(v, 0.75)) * S;
+      const fold = (fbm2(u * 7.5, v * 3.4, 3, 2.2, 0.55, seed) - 0.5) * lerp(0.004, 0.016, v) * S;
+      rr.push(rBody + gap + fold);
+      yy.push(y);
+    }
+    rad.push(rr);
+    ys.push(yy);
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const src = rad.map((r) => r.slice());
+    for (let vi = 0; vi <= downJ; vi++) {
+      for (let ui = 0; ui < around; ui++) {
+        const a = src[Math.max(0, vi - 1)][ui];
+        const b = src[vi][ui];
+        const c = src[Math.min(downJ, vi + 1)][ui];
+        const l = src[vi][(ui - 1 + around) % around];
+        const r = src[vi][(ui + 1) % around];
+        rad[vi][ui] = b * 0.44 + (a + c) * 0.19 + (l + r) * 0.09;
+      }
+    }
+  }
+
   const ring: number[][] = [];
   for (let vi = 0; vi <= downJ; vi++) {
     const v = vi / downJ;
     const row: number[] = [];
     for (let ui = 0; ui < around; ui++) {
-      // u = 0.5 at the chest so the texture's front graphics land on the chest.
-      const u = ui / around;
-      const theta = (u - 0.5) * Math.PI * 2;
-      const dirX = -Math.sin(theta);
-      const dirZ = Math.cos(theta);
-      const y = lerp(topAt(Math.abs(theta)), hemY, v);
-      const rBody = surfaceRadius(dressForm, y, 0, 0, dirX, dirZ, 0.02 * S, 0.34 * S);
-      const gap = lerp(0.009, 0.036, Math.pow(v, 0.75)) * S;
-      const fold = (fbm2(u * 7.5, v * 3.4, 3, 2.2, 0.55, seed) - 0.5) * lerp(0.004, 0.018, v) * S;
-      const r = rBody + gap + fold;
+      const [dirX, dirZ] = dirs[ui];
+      const r = rad[vi][ui];
+      const x = dirX * r;
+      const y = ys[vi][ui];
+      const z = dirZ * r;
+      // The armhole is *not* cut out of this surface. It was, and the result
+      // was worse: a hole carved against the rest pose is in the wrong place
+      // the moment the arm moves, so it opens as a ragged notch across the
+      // chest. Leaving the loft intact lets the arm intersect the cloth, and
+      // the intersection curve is exactly the silhouette an armhole should
+      // have — with the arm filling it in every pose rather than one.
       row.push(
-        mb.push({ x: dirX * r, y, z: dirZ * r, nx: dirX, ny: 0.05, nz: dirZ, u, v: KIT_UV.jersey(v) }),
+        mb.push({ x, y, z, nx: dirX, ny: 0.05, nz: dirZ, u: ui / around, v: KIT_UV.jersey(v) }),
       );
     }
     ring.push(row);
@@ -1434,6 +1521,7 @@ function buildKit(
   rimRow(mb, ring[downJ], around, 0.006 * S, -0.011 * S, KIT_UV.jersey(0.985));
 
   // --- Shorts -----------------------------------------------------------
+  mb.mask = MASK_SHORTS;
   const I = BONE_INDEX;
   const waistY = 0.545 * H;
   const crotchY = 0.468 * H;
@@ -1446,10 +1534,13 @@ function buildKit(
     for (let ui = 0; ui < around; ui++) {
       const u = ui / around;
       const theta = (u - 0.5) * Math.PI * 2;
-      const dirX = -Math.sin(theta);
+      const dirX = Math.sin(theta);
       const dirZ = Math.cos(theta);
-      const rBody = surfaceRadius(legForm, y, 0, 0, dirX, dirZ, 0.02 * S, 0.34 * S);
-      const gap = lerp(0.008, 0.028, v) * S;
+      // Tapered toward the crotch so the shell tucks inside the leg tubes;
+      // left at the pelvis radius it flares out as a pair of skirt wings.
+      const rBody = surfaceRadius(legForm, y, 0, 0, dirX, dirZ, 0.02 * S, 0.34 * S) *
+        lerp(1, 0.7, v * v);
+      const gap = lerp(0.009, 0.02, v) * S;
       const fold =
         (fbm2(u * 4.5, v * 2.2 + 11, 2, 2.2, 0.55, seed + 5) - 0.5) * lerp(0.002, 0.012, v) * S;
       const r = rBody + gap + fold;
@@ -1475,18 +1566,19 @@ function buildKit(
     }
   }
   rimRow(mb, hipRow[0], around, 0.008 * S, 0.013 * S, KIT_UV.shorts(0.02));
+  rimRow(mb, hipRow[hipRings], around, 0.05 * S, -0.02 * S, KIT_UV.shorts(0.34));
 
   // Leg tubes overlap the hip shell inside the body — invisible, and far
   // better behaved than splitting one tube at the crotch.
   const legRings = [4, 5, 7][detail];
-  const hemLegY = 0.278 * H;
+  const hemLegY = 0.336 * H;
   const around2 = Math.max(10, Math.round(around * 0.6));
   for (const sgn of [1, -1]) {
     const thigh = segs[sgn > 0 ? I.thighL : I.thighR];
     const rows: number[][] = [];
     for (let vi = 0; vi <= legRings; vi++) {
       const v = vi / legRings;
-      const y = lerp(crotchY + 0.028 * H, hemLegY, v);
+      const y = lerp(crotchY + 0.044 * H, hemLegY, v);
       const tAlong = clamp01((thigh.a.y - y) / Math.max(1e-4, thigh.a.y - thigh.b.y));
       const cx = lerp(thigh.a.x, thigh.b.x, tAlong);
       const cz = lerp(thigh.a.z, thigh.b.z, tAlong);
@@ -1494,12 +1586,20 @@ function buildKit(
       for (let ui = 0; ui < around2; ui++) {
         const u = ui / around2;
         const theta = (u - 0.5) * Math.PI * 2;
-        const dirX = -Math.sin(theta);
+        const dirX = Math.sin(theta);
         const dirZ = Math.cos(theta);
-        const rBody = surfaceRadius(legForm, y, cx, cz, dirX, dirZ, 0.02 * S, 0.2 * S);
-        // Heavier cloth than the jersey: fewer, larger folds, flaring to the hem.
-        const gap = lerp(0.013, 0.05, Math.pow(v, 0.8)) * S * shape.build;
-        const fold = Math.sin(u * Math.PI * 2 * 3 + v * 2.1 + sgn) * lerp(0.002, 0.012, v) * S;
+        // The thigh radius is taken analytically from the same profile the
+        // field was built from rather than by ray-marching the body: a march
+        // from the thigh axis toward the midline runs straight through the
+        // crotch into the other leg and balloons the tube into a hanging slab.
+        const rs = lerp(0.09, 0.073, v) * S * shape.build;
+        const rf = lerp(0.098, 0.08, v) * S * shape.build;
+        const sn = Math.sin(theta) / rs;
+        const cs = Math.cos(theta) / rf;
+        const rBody = 1 / Math.sqrt(sn * sn + cs * cs);
+        // Heavier cloth than the jersey: fewer, larger folds, a modest flare.
+        const gap = lerp(0.016, 0.032, Math.pow(v, 0.8)) * S * shape.build;
+        const fold = Math.sin(u * Math.PI * 2 * 3 + v * 2.1 + sgn) * lerp(0.002, 0.009, v) * S;
         const r = rBody + gap + fold;
         row.push(
           mb.push({
@@ -1615,6 +1715,7 @@ function buildShoes(
   const H = sk.height;
   const S = H / 1.98;
   const mb = new MeshBuilder(segs);
+  mb.mask = MASK_SHOE;
   const I = BONE_INDEX;
   const sections = [10, 13, 16][detail];
   const around = [10, 12, 14][detail];
@@ -1693,11 +1794,11 @@ function buildShoes(
     const sockRows: number[][] = [];
     for (let ri = 0; ri <= sockRings; ri++) {
       const t = ri / sockRings;
-      const y = origin.y + lerp(0.004, 0.095, t) * H;
+      const y = origin.y + lerp(0.004, 0.072, t) * H;
       const tAlong = clamp01((shin.a.y - y) / Math.max(1e-4, shin.a.y - shin.b.y));
       const cx = lerp(shin.a.x, shin.b.x, tAlong);
       const cz = lerp(shin.a.z, shin.b.z, tAlong);
-      const r = lerp(0.048, 0.054, t) * S * shape.build;
+      const r = lerp(0.047, 0.05, t) * S * shape.build;
       const row: number[] = [];
       for (let ui = 0; ui < around; ui++) {
         const phi = (ui / around) * Math.PI * 2;
@@ -1766,16 +1867,19 @@ interface HairSpec {
   shells: number;
   /** Outermost shell offset, in metres at a 1.98 m frame. */
   depth: number;
-  /** How far down the forehead the hairline sits. */
-  frontLine: number;
+  /**
+   * Polar angle from the crown, in radians, at which the hairline sits when
+   * facing forward. The nape always runs to 1.62 (the equator of the skull).
+   */
+  hairline: number;
   band: boolean;
 }
 
 const HAIR_SPECS: Record<Exclude<HairStyle, 'bald'>, HairSpec> = {
-  fade: { shells: 2, depth: 0.01, frontLine: 0.12, band: false },
-  crop: { shells: 3, depth: 0.021, frontLine: 0.04, band: false },
-  afro: { shells: 4, depth: 0.044, frontLine: 0.06, band: false },
-  headband: { shells: 2, depth: 0.012, frontLine: 0.18, band: true },
+  fade: { shells: 2, depth: 0.008, hairline: 0.94, band: false },
+  crop: { shells: 3, depth: 0.018, hairline: 1.0, band: false },
+  afro: { shells: 4, depth: 0.042, hairline: 1.02, band: false },
+  headband: { shells: 2, depth: 0.01, hairline: 0.86, band: true },
 };
 
 /**
@@ -1794,11 +1898,11 @@ function buildHair(
   const S = H / 1.98;
   const spec = HAIR_SPECS[style];
   const mb = new MeshBuilder(segs);
-  const headY = sk.restWorld[BONE_INDEX.head].y;
-  const centre = new Vector3(0, lerp(headY, 0.995 * H, 0.46), 0.004 * H);
-  const rx = 0.081 * H;
-  const ry = 0.116 * H;
-  const rz = 0.1 * H;
+  mb.mask = MASK_HAIR;
+  const centre = new Vector3(0, 0.933 * H, 0.003 * H);
+  const rx = 0.0425 * H;
+  const ry = 0.0655 * H;
+  const rz = 0.0545 * H;
   const cols = [12, 14, 16][detail];
   const rows = [6, 7, 9][detail];
   const rng = makeRng(seed);
@@ -1815,11 +1919,14 @@ function buildHair(
         const sy = Math.cos(pol);
         const sx = Math.sin(pol) * Math.sin(az);
         const sz = Math.sin(pol) * Math.cos(az);
-        // Hairline: hair stops higher at the forehead than at the nape.
-        const front = clamp01((sz * 0.5 + 0.5 - spec.frontLine) * 3.2);
-        const nape = clamp01((0.55 - sz) * 2 + 0.35);
-        const cover = Math.min(1, front * 0.5 + nape * 0.55 + 0.1);
-        const grow = off * cover * (0.7 + 0.6 * rng());
+        // Hairline: hair stops well short of the brow at the front and runs
+        // to the equator at the nape. Anything that covers the forehead reads
+        // as a helmet, which is the named tell for hair.
+        const limit = lerp(1.62, spec.hairline, clamp01(sz * 1.15));
+        const cover = clamp01((limit - pol) / 0.2);
+        // Outside the hairline the shell is tucked inside the skull rather
+        // than left flat on the scalp, so no bald patch is ever drawn.
+        const grow = off * cover * (0.7 + 0.6 * rng()) - (1 - cover) * 0.014 * S;
         const nl = Math.hypot(sx / rx, sy / ry, sz / rz) || 1;
         row.push(
           mb.push({
@@ -1830,9 +1937,13 @@ function buildHair(
             ny: sy / ry / nl,
             nz: sz / rz / nl,
             u: (ci / cols) * 3.4,
-            // Each shell samples a different density row of the strand mask, so
-            // the outer shells are sparser and the silhouette frays.
-            v: ((s + (ri / rows) * 0.8) / spec.shells) * 0.94,
+            // Each shell samples a different density row of the strand mask,
+            // so the outer shells are sparser and the silhouette frays; the
+            // hairline itself frays hardest.
+            v: Math.min(
+              0.93,
+              Math.pow(s / spec.shells, 0.62) * 0.88 + (ri / rows) * 0.03 + (1 - cover) * 0.4,
+            ),
           }),
         );
       }

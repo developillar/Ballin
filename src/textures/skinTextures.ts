@@ -121,47 +121,47 @@ export interface SkinTone {
 export const SKIN_TONES: readonly SkinTone[] = [
   {
     name: 'fair',
-    color: 0xd8a882,
+    color: 0xdcb69e,
     subsurface: 0xd8402a,
     wrap: 0.42,
     sss: 0.34,
-    oilRoughness: 0.5,
+    oilRoughness: 0.55,
     specular: 0.78,
   },
   {
     name: 'olive',
-    color: 0xbe8a5e,
+    color: 0xc79b7c,
     subsurface: 0xc73a24,
     wrap: 0.36,
     sss: 0.3,
-    oilRoughness: 0.48,
+    oilRoughness: 0.53,
     specular: 0.85,
   },
   {
     name: 'tan',
-    color: 0x9c6a42,
+    color: 0xa87d5c,
     subsurface: 0xb03118,
     wrap: 0.3,
     sss: 0.26,
-    oilRoughness: 0.45,
+    oilRoughness: 0.5,
     specular: 0.95,
   },
   {
     name: 'brown',
-    color: 0x74492c,
+    color: 0x8e6140,
     subsurface: 0x92240f,
     wrap: 0.24,
     sss: 0.21,
-    oilRoughness: 0.42,
+    oilRoughness: 0.47,
     specular: 1.05,
   },
   {
     name: 'deep',
-    color: 0x4e2f1c,
+    color: 0x6b452b,
     subsurface: 0x6d1708,
     wrap: 0.19,
     sss: 0.17,
-    oilRoughness: 0.38,
+    oilRoughness: 0.44,
     specular: 1.18,
   },
 ];
@@ -309,37 +309,37 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
       // v: 0 at the chin, 1 at the crown.
       const faceMask = front * sstep(0.02, 0.16, v);
       // Brow ridge.
-      s.h += ridge(u, v, 0.5, 0.085, 0.55, 0.615, 0.035) * 1.5 * front;
+      s.h += ridge(u, v, 0.5, 0.085, 0.51, 0.575, 0.035) * 1.5 * front;
       // Eye sockets, then the globes sitting in them.
-      const eyeL = blob(u, v, 0.5 - 0.045, 0.5, 0.045, 0.05);
-      const eyeR = blob(u, v, 0.5 + 0.045, 0.5, 0.045, 0.05);
+      const eyeL = blob(u, v, 0.5 - 0.045, 0.46, 0.045, 0.05);
+      const eyeR = blob(u, v, 0.5 + 0.045, 0.46, 0.045, 0.05);
       s.h -= (eyeL + eyeR) * 1.5;
-      s.h += (blob(u, v, 0.5 - 0.043, 0.495, 0.026, 0.028) + blob(u, v, 0.5 + 0.043, 0.495, 0.026, 0.028)) * 1.6;
+      s.h += (blob(u, v, 0.5 - 0.043, 0.455, 0.026, 0.028) + blob(u, v, 0.5 + 0.043, 0.455, 0.026, 0.028)) * 1.6;
       // Nose: bridge, tip, wings.
-      s.h += ridge(u, v, 0.5, 0.02, 0.3, 0.565, 0.03) * 2.6;
-      s.h += blob(u, v, 0.5, 0.315, 0.028, 0.028) * 2.2;
-      s.h += (blob(u, v, 0.5 - 0.03, 0.3, 0.016, 0.02) + blob(u, v, 0.5 + 0.03, 0.3, 0.016, 0.02)) * 1.2;
+      s.h += ridge(u, v, 0.5, 0.02, 0.26, 0.52, 0.03) * 2.6;
+      s.h += blob(u, v, 0.5, 0.28, 0.028, 0.028) * 2.2;
+      s.h += (blob(u, v, 0.5 - 0.03, 0.27, 0.016, 0.02) + blob(u, v, 0.5 + 0.03, 0.27, 0.016, 0.02)) * 1.2;
       // Philtrum, lips, mental crease, chin.
-      s.h -= ridge(u, v, 0.5, 0.01, 0.24, 0.285, 0.015) * 0.8;
-      s.h += blob(u, v, 0.5, 0.222, 0.045, 0.017) * 1.3;
-      s.h += blob(u, v, 0.5, 0.19, 0.05, 0.017) * 1.5;
-      s.h -= ridge(u, v, 0.5, 0.055, 0.155, 0.175, 0.014) * 0.9;
-      s.h += blob(u, v, 0.5, 0.105, 0.06, 0.05) * 1.1;
+      s.h -= ridge(u, v, 0.5, 0.012, 0.2, 0.25, 0.02) * 0.45;
+      s.h += blob(u, v, 0.5, 0.185, 0.045, 0.017) * 1.3;
+      s.h += blob(u, v, 0.5, 0.155, 0.05, 0.017) * 1.5;
+      s.h -= ridge(u, v, 0.5, 0.06, 0.12, 0.14, 0.028) * 0.25;
+      s.h += blob(u, v, 0.5, 0.075, 0.06, 0.05) * 1.1;
       // Cheekbones and the nasolabial fold.
-      s.h += (blob(u, v, 0.5 - 0.105, 0.44, 0.05, 0.055) + blob(u, v, 0.5 + 0.105, 0.44, 0.05, 0.055)) * 1.2;
-      s.h -= (blob(u, v, 0.5 - 0.072, 0.235, 0.02, 0.05) + blob(u, v, 0.5 + 0.072, 0.235, 0.02, 0.05)) * 0.85;
+      s.h += (blob(u, v, 0.5 - 0.105, 0.4, 0.055, 0.06) + blob(u, v, 0.5 + 0.105, 0.4, 0.055, 0.06)) * 0.55;
+      s.h -= (blob(u, v, 0.5 - 0.072, 0.2, 0.026, 0.055) + blob(u, v, 0.5 + 0.072, 0.2, 0.026, 0.055)) * 0.22;
       // Ears.
-      const earL = blob(u, v, 0.5 - 0.245, 0.43, 0.045, 0.09);
-      const earR = blob(u, v, 0.5 + 0.245, 0.43, 0.045, 0.09);
+      const earL = blob(u, v, 0.5 - 0.245, 0.39, 0.045, 0.09);
+      const earR = blob(u, v, 0.5 + 0.245, 0.39, 0.045, 0.09);
       s.h += (earL + earR) * 2.2;
-      s.h -= (blob(u, v, 0.5 - 0.245, 0.42, 0.022, 0.05) + blob(u, v, 0.5 + 0.245, 0.42, 0.022, 0.05)) * 1.6;
+      s.h -= (blob(u, v, 0.5 - 0.245, 0.38, 0.022, 0.05) + blob(u, v, 0.5 + 0.245, 0.38, 0.022, 0.05)) * 1.6;
       // Temples and the occiput.
       s.h -= (blob(u, v, 0.5 - 0.17, 0.63, 0.05, 0.07) + blob(u, v, 0.5 + 0.17, 0.63, 0.05, 0.07)) * 0.7;
       s.h += blob(u, v, 0.0, 0.62, 0.18, 0.16) * 0.6;
 
       // --- Pigment. The only place albedo is allowed to carry detail. -----
       const brow =
-        blob(u, v, 0.5 - 0.05, 0.552, 0.06, 0.022) + blob(u, v, 0.5 + 0.05, 0.552, 0.06, 0.022);
+        blob(u, v, 0.5 - 0.05, 0.512, 0.06, 0.022) + blob(u, v, 0.5 + 0.05, 0.512, 0.06, 0.022);
       const browK = clamp01(brow * 1.4);
       s.r = lerp(s.r, 0.3, browK * 0.85);
       s.g = lerp(s.g, 0.24, browK * 0.85);
@@ -348,26 +348,26 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
       // Lash line and the sclera/iris, kept tiny — at FLOOR framing a head is
       // 25 px and resolvable eyes there are uncanny.
       const lash =
-        blob(u, v, 0.5 - 0.043, 0.512, 0.033, 0.008) + blob(u, v, 0.5 + 0.043, 0.512, 0.033, 0.008);
+        blob(u, v, 0.5 - 0.043, 0.472, 0.033, 0.008) + blob(u, v, 0.5 + 0.043, 0.472, 0.033, 0.008);
       const lashK = clamp01(lash * 1.6);
       s.r = lerp(s.r, 0.18, lashK);
       s.g = lerp(s.g, 0.15, lashK);
       s.b = lerp(s.b, 0.14, lashK);
       const sclera =
-        blob(u, v, 0.5 - 0.043, 0.494, 0.026, 0.011) + blob(u, v, 0.5 + 0.043, 0.494, 0.026, 0.011);
+        blob(u, v, 0.5 - 0.043, 0.454, 0.026, 0.011) + blob(u, v, 0.5 + 0.043, 0.454, 0.026, 0.011);
       const scleraK = clamp01(sclera * 2.2);
       s.r = lerp(s.r, 1.55, scleraK * 0.8);
       s.g = lerp(s.g, 1.5, scleraK * 0.8);
       s.b = lerp(s.b, 1.42, scleraK * 0.8);
       const iris =
-        blob(u, v, 0.5 - 0.043, 0.494, 0.011, 0.008) + blob(u, v, 0.5 + 0.043, 0.494, 0.011, 0.008);
+        blob(u, v, 0.5 - 0.043, 0.454, 0.011, 0.008) + blob(u, v, 0.5 + 0.043, 0.454, 0.011, 0.008);
       const irisK = clamp01(iris * 2.4);
       s.r = lerp(s.r, 0.24, irisK);
       s.g = lerp(s.g, 0.2, irisK);
       s.b = lerp(s.b, 0.17, irisK);
       s.rough -= irisK * 0.32;
       // Lips: redder, smoother, with a defined vermilion border.
-      const lip = clamp01((blob(u, v, 0.5, 0.222, 0.05, 0.02) + blob(u, v, 0.5, 0.19, 0.055, 0.02)) * 1.2);
+      const lip = clamp01((blob(u, v, 0.5, 0.185, 0.05, 0.02) + blob(u, v, 0.5, 0.155, 0.055, 0.02)) * 1.2);
       s.r *= 1 + lip * 0.3;
       s.g *= 1 - lip * 0.14;
       s.b *= 1 - lip * 0.12;
@@ -375,7 +375,7 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
       // Stubble on the jaw and upper lip — must reduce specular under it.
       const beardArea =
         clamp01(
-          (blob(u, v, 0.5, 0.14, 0.16, 0.12) + blob(u, v, 0.5, 0.265, 0.075, 0.035)) *
+          (blob(u, v, 0.5, 0.11, 0.16, 0.12) + blob(u, v, 0.5, 0.225, 0.075, 0.035)) *
             1.1 *
             front,
         ) * sstep(0.34, 0.2, v + 0.12);
@@ -386,12 +386,12 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
       s.rough += stubble * 0.22;
       s.h += (valueNoise2(cx * 500, v * 620, seed + 19) - 0.5) * stubble * 0.5;
       // Ear and nose cartilage read redder; so does the tip of the chin.
-      const capillary = clamp01((earL + earR) * 1.1 + blob(u, v, 0.5, 0.31, 0.05, 0.05) * 0.8);
+      const capillary = clamp01((earL + earR) * 1.1 + blob(u, v, 0.5, 0.28, 0.05, 0.05) * 0.8);
       s.r *= 1 + capillary * 0.14;
       s.b *= 1 - capillary * 0.08;
       // The forehead is the shiniest thing on a player.
-      s.rough -= faceMask * sstep(0.58, 0.78, v) * 0.14;
-      s.sweat = 0.3 + faceMask * sstep(0.5, 0.8, v) * 0.7 + front * 0.15;
+      s.rough -= faceMask * sstep(0.54, 0.74, v) * 0.14;
+      s.sweat = 0.3 + faceMask * sstep(0.46, 0.76, v) * 0.7 + front * 0.15;
       break;
     }
 

@@ -8,11 +8,17 @@
  *     wireframe cone. One BufferGeometry, allocated once, with positions and
  *     normals rewritten in place from a verlet solve. Cords catch light, cast
  *     shadow, and glow slightly at grazing angles the way thin nylon does.
- *  2. The **glass** is a coverage-mapped pane — the painted markings are opaque,
- *     the rest is 12–30% so the bowl reads through it darkened and greened —
- *     plus a separate emissive band for the 38 mm of glass thickness you can
- *     see into, and an additive, camera-parallaxed reflection of the ceiling
- *     banks carrying both specular populations.
+ *  2. The **glass** is a coverage-mapped pane. The trap it is easy to fall into
+ *     is treating "transparent" as the whole job: a pale pane at low coverage
+ *     *adds* light to the bowl behind it and comes out brighter than the crowd
+ *     beside it, which is what an opaque grey slab looks like. So the pane's
+ *     unpainted base is a dark green-teal at 26–62% coverage — it subtracts,
+ *     the way glass does — and everything bright on the board is then added
+ *     back on purpose: opaque paint in the same coverage map (with the rear
+ *     face's ghost of it alongside), an emissive band for the 38 mm of
+ *     thickness you look into at the perimeter, and an additive,
+ *     camera-parallaxed, Fresnel-scaled reflection of the ceiling banks
+ *     carrying both of §1.4's specular populations.
  *  3. The **ring breaks away**. Rim contact drives a damped hinge spring at the
  *     mount plate; the net is pinned to the ring, so it swings from the impulse.
  *
@@ -73,9 +79,16 @@ const CORD_SIDES: Record<string, number> = { low: 4, medium: 5, high: 6, ultra: 
 /** Twists per metre of cord — sets how fast the braid spirals. */
 const CORD_TWISTS_PER_M = 190;
 
-/** Hourglass profile: where the waist sits, and how tight it pulls. */
-const NET_WAIST_T = 0.62;
-const NET_WAIST_SCALE = 0.565;
+/**
+ * Hourglass profile: where the waist sits, and how tight it pulls.
+ *
+ * A 120-count net with twelve stiffened anti-whip loops chokes hard — the waist
+ * on a real net is a little over half the ring radius and sits above the
+ * mid-point. Round 1 had it at 0.565/0.62, which drapes wide enough that the
+ * lattice reads as string art rather than as a taut net.
+ */
+const NET_WAIST_T = 0.575;
+const NET_WAIST_SCALE = 0.495;
 
 /** Speed ceiling on any single cord knot, m/s. Purely a stability guard. */
 const MAX_CORD_SPEED = 14;
@@ -247,6 +260,7 @@ export class Basket {
   private restRingR: number[] = [];
 
   private reflMap: Texture | null = null;
+  private specMat: MeshBasicMaterial | null = null;
   private netDirty = true;
   private restCounter = 0;
   private asleep = false;
@@ -312,12 +326,17 @@ export class Basket {
     // Two co-planar layers, because a single alpha-blended plane cannot do both
     // jobs: anything you can see through also fades out its own reflections.
     //
-    //   base  — 12–30% coverage, so the crowd reads through it but darkened and
-    //           greened; the painted markings sit at full coverage in the same
-    //           map, which keeps them crisp and correctly lit.
+    //   base  — a *dark* green-teal at 26–62% coverage. Alpha compositing is
+    //           `src·a + dst·(1−a)`, so the base colour is what the pane does to
+    //           the bowl behind it. Dark subtracts, which is what glass does;
+    //           the pale base this used to carry added light instead and the
+    //           board came out brighter than the crowd beside it. The painted
+    //           markings sit at full coverage in the same map, which keeps them
+    //           crisp and correctly lit.
     //   spec  — additive, black diffuse, so all it ever contributes is the
-    //           Fresnel reflection of the ceiling banks. This is the bright
-    //           streak that makes a board read as glass instead of perspex.
+    //           reflection of the ceiling banks, scaled per frame by a real
+    //           Fresnel term. This is the bright streak that makes a board read
+    //           as glass instead of perspex.
     const paneGeo = new PlaneGeometry(B.width, B.height, 1, 1);
     const yaw = this.side > 0 ? -Math.PI / 2 : Math.PI / 2;
 
@@ -329,52 +348,64 @@ export class Basket {
       depthWrite: false,
       roughness: 1,
       metalness: 0,
-      reflectivity: 0.5,
-      envMapIntensity: 0.5,
+      ior: 1.52,
+      specularIntensity: 1,
+      envMapIntensity: 0.9,
       side: DoubleSide,
     });
     const pane = new Mesh(paneGeo, glass);
     pane.rotation.y = yaw;
     pane.position.copy(this.boardCentre);
-    pane.renderOrder = 2;
+    // The arena hangs an additive haze shell at renderOrder 3 and light shafts
+    // at 4, both with depthWrite off. The pane does not write depth either, so
+    // at renderOrder 2 the *far* wall of that haze shell was being composited
+    // on top of the board — a grey additive veil over the one surface in the
+    // frame that must stay dark. The board is atmospheric-nearfield: it belongs
+    // after both. (VFX particles live at 10–12 and correctly stay in front.)
+    pane.renderOrder = 5;
     this.boardGroup.add(pane);
 
     this.reflMap = bakeGlassReflection(B.width, B.height, size >> 1);
     const specMat = new MeshBasicMaterial({
       map: this.reflMap,
       transparent: true,
+      opacity: 0.62,
       depthWrite: false,
       blending: AdditiveBlending,
       side: FrontSide,
     });
+    this.specMat = specMat;
     const spec = new Mesh(paneGeo, specMat);
     spec.rotation.y = yaw;
     spec.position.copy(this.boardCentre);
-    spec.renderOrder = 4;
+    spec.renderOrder = 6;
     this.boardGroup.add(spec);
 
     // --- the 38 mm edge ----------------------------------------------------
-    // A separate band so we can crank the green way past what the face uses.
+    // The perimeter is the one place you look *into* the glass rather than
+    // through it, so it collects the whole pane's tint and the light piped down
+    // it — a brighter, greener band, and one of the strongest "this is real
+    // glass" cues there is. It is also very easy to overcook: round 1 had this
+    // at 4.6 stops over the crowd and it read as a neon plastic frame, so the
+    // colour here is deliberately a desaturated sea-green, not a signal green.
     const edgeMat = new MeshPhysicalMaterial({
-      color: 0x63c9a2,
-      roughness: 0.05,
+      color: 0x74a496,
+      roughness: 0.06,
       metalness: 0,
-      reflectivity: 1,
       ior: 1.52,
-      // Light piping down the pane exits at the ground edge; that glow is the
-      // single most recognisable detail on a real backboard.
-      emissive: 0x2b7d63,
-      emissiveIntensity: 0.6,
+      specularIntensity: 1,
+      emissive: 0x143b32,
+      emissiveIntensity: 0.62,
       clearcoat: 1,
-      clearcoatRoughness: 0.03,
-      envMapIntensity: 2.0,
+      clearcoatRoughness: 0.04,
+      envMapIntensity: 1.1,
     });
     const eb = 0.013; // how much of the perimeter reads as exposed edge
     const hw = B.width / 2;
     const hh = B.height / 2;
     const t = B.thickness;
     // A whisker thicker than the pane so the two never fight for the same depth.
-    const et = t * 1.06;
+    const et = t * 1.02;
     const edge = mergeGeos([
       at(new BoxGeometry(et, eb, B.width), face, this.boardCentre.y + hh - eb / 2, 0),
       at(new BoxGeometry(et, eb, B.width), face, this.boardCentre.y - hh + eb / 2, 0),
@@ -386,14 +417,20 @@ export class Basket {
     this.boardGroup.add(edgeMesh);
 
     // --- rear channel, mount plate and bolts -------------------------------
+    // Dark anodised, not polished. This frame sits *behind* the glass, and now
+    // that the glass is genuinely dark and genuinely transparent, any narrow
+    // bright edge back here comes through the pane as a thin, razor-sharp light
+    // line — indistinguishable from a rendering artefact and exactly the kind of
+    // stray streak a reviewer flags. Broad and dull keeps the structure legible
+    // (§5.1 wants the mount visible) without lighting up its own silhouette.
     const alu = new MeshPhysicalMaterial({
-      color: 0x9aa0a6,
-      roughness: 0.24,
-      metalness: 1,
-      anisotropy: 0.55,
-      envMapIntensity: 1.5,
-      clearcoat: 0.3,
-      clearcoatRoughness: 0.25,
+      color: 0x4b5158,
+      roughness: 0.52,
+      metalness: 0.5,
+      anisotropy: 0.35,
+      envMapIntensity: 0.7,
+      clearcoat: 0.15,
+      clearcoatRoughness: 0.45,
     });
     const back = face + this.side * (t / 2 + 0.012);
     const chan: BufferGeometry[] = [
@@ -402,17 +439,21 @@ export class Basket {
       at(new BoxGeometry(0.026, 0.034, B.width), back, this.boardCentre.y - hh + 0.015, 0),
       at(new BoxGeometry(0.026, B.height, 0.032), back, this.boardCentre.y, hw - 0.014),
       at(new BoxGeometry(0.026, B.height, 0.032), back, this.boardCentre.y, -hw + 0.014),
-      // Mount plate the rim and the arms bolt into.
-      at(new BoxGeometry(0.05, 0.62, 0.60), back + this.side * 0.03, HOOP.rimHeight + 0.12, 0),
-      at(new BoxGeometry(0.03, 0.34, 0.90), back + this.side * 0.02, this.boardCentre.y + 0.34, 0),
+      // Mount plate the rim and the arms bolt into, and the upper brace. Both
+      // are kept as slim as a real fabrication allows: every square centimetre
+      // of steel back here is a square centimetre of bowl you cannot see
+      // through the glass, and seeing the crowd through the board is the whole
+      // point of the board being glass.
+      at(new BoxGeometry(0.05, 0.44, 0.42), back + this.side * 0.03, HOOP.rimHeight + 0.10, 0),
+      at(new BoxGeometry(0.03, 0.15, 0.72), back + this.side * 0.02, this.boardCentre.y + 0.34, 0),
     ];
-    for (const dz of [-0.21, 0.21]) {
-      for (const dy of [-0.2, 0.2]) {
+    for (const dz of [-0.15, 0.15]) {
+      for (const dy of [-0.15, 0.15]) {
         chan.push(
           at(
-            new CylinderGeometry(0.011, 0.011, 0.05, 8).rotateZ(Math.PI / 2),
+            new CylinderGeometry(0.010, 0.010, 0.05, 8).rotateZ(Math.PI / 2),
             back + this.side * 0.06,
-            HOOP.rimHeight + 0.12 + dy,
+            HOOP.rimHeight + 0.10 + dy,
             dz,
           ),
         );
@@ -493,7 +534,14 @@ export class Basket {
       // brushed/turned tube does.
       anisotropy: 0.55,
       anisotropyRotation: Math.PI / 2,
-      envMapIntensity: 1.35,
+      envMapIntensity: 1.7,
+      // A whisper of self-emission. The ring hangs inside a bowl held three
+      // stops under the floor, and a saturated red albedo in that little light
+      // tonemaps to maroon — which is what round 1 saw. This is a floor, not a
+      // glow: it costs about six sRGB units in the darkest part of the tube and
+      // keeps the coat reading as bright orange-red rather than oxblood.
+      emissive: 0xd05a22,
+      emissiveIntensity: 0.055,
     });
 
     // 12 × 80 keeps the ring's silhouette clean at RIM framing for 1,920 tris;
@@ -752,8 +800,10 @@ export class Basket {
             b,
             // Cord is a hair longer than the taut design shape, so gravity has
             // something to pull out of and the net hangs rather than stands.
-            rest: nodes[a].pos.distanceTo(nodes[b].pos) * 1.006,
-            stiffness: 0.96,
+            // Only a hair, though: braided nylon barely stretches, and slack
+            // here is what makes the mesh look loose and open.
+            rest: nodes[a].pos.distanceTo(nodes[b].pos) * 1.0025,
+            stiffness: 0.97,
             cord: true,
           });
         }
@@ -810,7 +860,9 @@ export class Basket {
         const t = i / R;
         // Used nets are never white: bright at the top, greying to a soiled
         // hem, with the loops darkened where they saw against the hooks.
-        const soil = 0.90 - 0.50 * Math.pow(t, 1.7);
+        // §5.3 puts the top at 200–235 and the hem at 180–210, so the tonal
+        // drop across the net is far smaller than it is tempting to make it.
+        const soil = 0.93 - 0.34 * Math.pow(t, 1.6);
         const choke = 1 - 0.26 * clamp01(1 - t / 0.10);
         const lum = clamp01(soil * choke * tone);
         for (let j = 0; j < K; j++) {
@@ -873,7 +925,7 @@ export class Basket {
     // as emission rather than alpha keeps the net opaque — no sort order, no
     // depth fighting between 24 interleaved strands — while still giving the
     // soft, slightly glowing filament edge that reads as a real net.
-    const edgeGlow: IUniform<number> = { value: 0.55 };
+    const edgeGlow: IUniform<number> = { value: 0.42 };
     this.netGlow = edgeGlow;
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uCordGlow = edgeGlow;
@@ -900,7 +952,7 @@ export class Basket {
     this.syncNetGeometry();
   }
 
-  private netGlow: IUniform<number> = { value: 0.55 };
+  private netGlow: IUniform<number> = { value: 0.42 };
 
   // -------------------------------------------------------------------------
   // Simulation
@@ -1114,7 +1166,9 @@ export class Basket {
       mean /= S;
       if (mean < 1e-5) continue;
       const target = this.restRingR[r];
-      const kRing = r <= 2 ? 0.045 : 0.016;
+      // The top rings carry the stiffened anti-whip loops, so they hold their
+      // shape much harder than the free mesh below them.
+      const kRing = r <= 2 ? 0.058 : 0.020;
       const corr = (target - mean) * kRing;
       for (let s = 0; s < S; s++) {
         const n = this.nodes[r * S + s];
@@ -1396,9 +1450,15 @@ export class Basket {
   }
 
   /**
-   * Slides the baked bank reflection against the camera. A real reflection
-   * parallaxes; a decal does not, and the difference is obvious the moment the
-   * camera moves even slightly.
+   * Slides the baked bank reflection against the camera, and scales it by the
+   * Fresnel term for the current viewing angle.
+   *
+   * Both halves matter. A real reflection parallaxes; a decal does not, and the
+   * difference is obvious the moment the camera moves even slightly. And real
+   * glass reflects ~8% of what is in front of it face-on but approaches 100% at
+   * grazing incidence — so the streaks have to *strengthen* as the camera swings
+   * off-axis. A reflection of constant intensity is the signature of a texture
+   * that has been painted onto a plane.
    */
   parallaxGlass(camera: Vector3): void {
     const m = this.reflMap;
@@ -1411,6 +1471,17 @@ export class Basket {
       clamp((-dz / d) * 0.09, -0.06, 0.06) * this.side,
       clamp((dy / d) * 0.07, -0.05, 0.05),
     );
+
+    if (this.specMat) {
+      // cos of the angle between the board normal and the view ray.
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const cosT = clamp01(Math.abs(dx) / len);
+      // Schlick, with R0 for an air/glass interface at n = 1.52.
+      const f = 0.043 + 0.957 * Math.pow(1 - cosT, 5);
+      // Normalised against a plausible worst case so the base bake is what you
+      // see head-on and the grazing case roughly doubles it.
+      this.specMat.opacity = clamp(0.5 + 2.6 * f, 0.5, 1);
+    }
   }
 
   dispose(): void {

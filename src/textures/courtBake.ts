@@ -34,6 +34,15 @@ export const LOGO_RADIUS = 2.06;
 export interface CourtBake {
   albedo: HTMLCanvasElement;
   mask: HTMLCanvasElement;
+  /**
+   * Centre logo, RGBA, on its own square texture covering exactly
+   * 2 × `LOGO_RADIUS` metres. It is *not* composited into the albedo: a
+   * whole-court bake gives the centre circle barely 50 texels per metre, which
+   * magnifies to mush at the FLOOR framing, and compositing would also throw
+   * away the coverage channel that lets worn paint show bare wood through.
+   * RGB is pigment; A is paint coverage after wear.
+   */
+  logo: HTMLCanvasElement;
   detail: MapleDetail;
   layout: CourtLayout;
 }
@@ -159,8 +168,9 @@ function scratch(W: number, H: number): CanvasRenderingContext2D {
  * @param height texel height of the whole-court maps; width follows from the
  *   real aspect so texels stay square (the distance fields depend on it).
  * @param detailSize edge length of the tiling grain texture.
+ * @param logoSize edge length of the dedicated centre-logo texture.
  */
-export function bakeCourt(height: number, detailSize: number): CourtBake {
+export function bakeCourt(height: number, detailSize: number, logoSize = 512): CourtBake {
   const L = makeLayout(height);
   const { W, H, ppm } = L;
   const rng = makeRng(0x8ba11);
@@ -184,11 +194,19 @@ export function bakeCourt(height: number, detailSize: number): CourtBake {
       const x = (i + 0.5) / ppm - L.totalW * 0.5;
       const o = (j * W + i) * 4;
 
-      // Hard maple under amber polyurethane. Kept deliberately below the
-      // "pale laminate" range so the lit floor lands near 110–135 sRGB.
-      let r = 0.53;
-      let g = 0.383;
-      let b = 0.212;
+      // Hard maple under amber polyurethane.
+      //
+      // Two things fight over what the floor's hue ends up being. The coat is a
+      // bright dielectric interface, so a large, *achromatic* specular term is
+      // laid over the albedo at exactly the grazing angles a broadcast framing
+      // uses; and ACES desaturates as it approaches the shoulder. Both push the
+      // maple toward grey. The base therefore has to be carried well warmer and
+      // more saturated than a photographed swatch of finished maple — HSV
+      // ~32° / 66% / 58% here — so that what survives the coat and the tone
+      // curve is golden-amber with orange in the midtones rather than pine.
+      let r = 0.575;
+      let g = 0.408;
+      let b = 0.228;
 
       // Slow stain drift over metres.
       const drift = fbm2(x * 0.055, z * 0.075, 3, 2, 0.5, 11) - 0.5;
@@ -230,7 +248,6 @@ export function bakeCourt(height: number, detailSize: number): CourtBake {
   }
   actx.putImageData(aimg, 0, 0);
 
-  drawCentreLogo(actx, L, rng);
   drawWear(actx, L, rng);
 
   // ---- distance fields ---------------------------------------------------
@@ -359,101 +376,223 @@ export function bakeCourt(height: number, detailSize: number): CourtBake {
   mctx.putImageData(mimg, 0, 0);
 
   const detail = bakeMapleDetail(detailSize, detailSize);
-  return { albedo: acvs, mask: mcvs, detail, layout: L };
+  const logo = bakeCentreLogo(logoSize, makeRng(0x10c0));
+  return { albedo: acvs, mask: mcvs, logo, detail, layout: L };
 }
 
 /**
- * Centre logo. Painted on sanded wood before the coat went down, which means
- * it is slightly desaturated, warm-shifted by the varnish, worn where the
- * jump ball happens, and — because the shader mixes it against the wood's own
- * luminance — carries the grain through it.
+ * Centre logo, on its own texture.
+ *
+ * A court graphic is stencilled pigment on sanded maple and then buried under
+ * the same polyurethane as everything else, so three things have to be true of
+ * it and all three were wrong when it was composited into the whole-court
+ * albedo at 50 texels/m:
+ *
+ *  - it is *confidently coloured*. Under-saturating a court logo to "look
+ *    aged" is the wrong instinct; the varnish yellows and mutes it a few
+ *    percent, it does not turn it grey. The pigments here sit at 60–70% HSV
+ *    saturation, warm-shifted, which is what stencil paint under amber gloss
+ *    actually measures. §2.5's ceiling is 72%.
+ *  - it is *worn*, and the wear has structure: the jump-ball circle is scrubbed
+ *    hardest, pivot arcs run through it, and in the worst patches the pigment
+ *    is gone rather than merely faded. That is why coverage lives in alpha —
+ *    the shader can then show bare wood through it instead of blending toward
+ *    a lighter flat colour.
+ *  - its *edges* are as crisp as the line work, which needs resolution the
+ *    whole-court bake does not have.
+ *
+ * Everything else that makes it read as under the coat — the grain telegraph,
+ * the shared specular streak, the roughness fill — is applied in the shader.
+ *
+ * @param S edge length in texels; the texture spans exactly 2 × LOGO_RADIUS m.
  */
-function drawCentreLogo(ctx: CanvasRenderingContext2D, L: CourtLayout, rng: () => number): void {
-  const R = L.m(LOGO_RADIUS);
-  ctx.save();
-  ctx.translate(L.cx(0), L.cz(0));
+function bakeCentreLogo(S: number, rng: () => number): HTMLCanvasElement {
+  const cvs = document.createElement('canvas');
+  cvs.width = S;
+  cvs.height = S;
+  const ctx = cvs.getContext('2d', { willReadFrequently: true })!;
+  const R = S * 0.5;
+  /** Metres → texels on this canvas. */
+  const m = (v: number) => (v / (LOGO_RADIUS * 2)) * S;
+  ctx.translate(R, R);
 
-  // Painted colours stay under ~72% HSV saturation: pigment under amber gloss.
-  const navy = '#2b415c';
-  const gold = '#a8823f';
-  const cream = '#ddd2bc';
+  // Pigment under amber gloss. Checked against §2.5's 72% HSV ceiling:
+  // navy 68%, gold 68%, brick 70%, cream 16%.
+  const navy = '#22406a';
+  const navyDeep = '#1a3355';
+  const gold = '#b8873a';
+  const brick = '#ad5c33';
+  const cream = '#eadfc6';
 
-  ctx.globalAlpha = 0.88;
-  ctx.fillStyle = navy;
+  // --- field ---------------------------------------------------------------
+  // Slightly deeper toward the rim: stencil paint pools at the mask edge.
+  const field = ctx.createRadialGradient(0, -R * 0.15, R * 0.08, 0, 0, R);
+  field.addColorStop(0, navy);
+  field.addColorStop(0.72, navy);
+  field.addColorStop(1, navyDeep);
+  ctx.fillStyle = field;
   ctx.beginPath();
-  ctx.arc(0, 0, R, 0, Math.PI * 2);
+  ctx.arc(0, 0, R * 0.995, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.globalAlpha = 0.9;
-  ctx.strokeStyle = gold;
-  ctx.lineWidth = L.m(0.075);
+  // --- rings ---------------------------------------------------------------
+  // A bare-wood gap between the field and the inner rule, so the wood reads
+  // *through* the mark and not only around it.
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = m(0.075);
   ctx.beginPath();
-  ctx.arc(0, 0, R * 0.88, 0, Math.PI * 2);
+  ctx.arc(0, 0, R * 0.9, 0, Math.PI * 2);
   ctx.stroke();
+  ctx.globalCompositeOperation = 'source-over';
+
+  ctx.strokeStyle = gold;
+  ctx.lineWidth = m(0.105);
   ctx.beginPath();
-  ctx.arc(0, 0, R * 0.8, 0, Math.PI * 2);
+  ctx.arc(0, 0, R * 0.835, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Wordmark, tracked out the way a court graphic is.
-  ctx.globalAlpha = 0.92;
-  ctx.fillStyle = cream;
+  ctx.strokeStyle = brick;
+  ctx.lineWidth = m(0.036);
+  ctx.beginPath();
+  ctx.arc(0, 0, R * 0.775, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // --- wordmark ------------------------------------------------------------
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const fs = Math.round(R * 0.34);
+  ctx.textBaseline = 'alphabetic';
+  const fs = Math.round(R * 0.26);
   ctx.font = `900 ${fs}px ui-sans-serif, system-ui, sans-serif`;
   const word = 'BALLIN';
-  const track = fs * 0.2;
-  let total = 0;
+  const track = fs * 0.16;
+  let total = -track;
   for (const ch of word) total += ctx.measureText(ch).width + track;
-  total -= track;
-  let cx = -total / 2;
-  for (const ch of word) {
-    const w = ctx.measureText(ch).width;
-    ctx.fillText(ch, cx + w / 2, 0);
-    cx += w + track;
-  }
 
-  // Ball glyph under the wordmark.
-  ctx.globalAlpha = 0.8;
-  ctx.strokeStyle = gold;
-  ctx.lineWidth = L.m(0.045);
-  const br = R * 0.2;
-  const by = R * 0.44;
+  const drawWord = (dy: number, fill: string) => {
+    ctx.fillStyle = fill;
+    let cx = -total / 2;
+    for (const ch of word) {
+      const w = ctx.measureText(ch).width;
+      ctx.fillText(ch, cx + w / 2, dy);
+      cx += w + track;
+    }
+  };
+  // Offset drop colour, the way a two-plate court graphic is screened.
+  drawWord(fs * 0.36 + m(0.055), brick);
+  drawWord(fs * 0.36, cream);
+
+  // --- ball glyph, above the wordmark -------------------------------------
+  const br = R * 0.23;
+  const by = -R * 0.42;
+  ctx.fillStyle = gold;
   ctx.beginPath();
   ctx.arc(0, by, br, 0, Math.PI * 2);
-  ctx.stroke();
+  ctx.fill();
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = m(0.05);
   ctx.beginPath();
   ctx.moveTo(-br, by);
   ctx.lineTo(br, by);
   ctx.moveTo(0, by - br);
   ctx.lineTo(0, by + br);
   ctx.stroke();
-
-  // Wear: centre court is a jump-ball circle and a lot of feet. Scrub the
-  // paint back with soft wood-coloured strokes rather than lowering opacity,
-  // so the wear has structure.
-  ctx.globalCompositeOperation = 'destination-out';
-  for (let i = 0; i < 260; i++) {
-    const a = rng() * Math.PI * 2;
-    const rr = Math.sqrt(rng()) * R;
-    const len = L.m(0.08 + rng() * 0.45);
-    const ang = a + (rng() - 0.5) * 1.6;
-    ctx.globalAlpha = 0.05 + rng() * 0.14;
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = L.m(0.01 + rng() * 0.035);
+  // The two curved channels of an eight-panel ball.
+  for (const s of [-1, 1] as const) {
     ctx.beginPath();
-    const sx = Math.cos(a) * rr;
-    const sy = Math.sin(a) * rr;
-    ctx.moveTo(sx, sy);
+    ctx.moveTo(s * br * 0.98, by - br * 0.2);
+    ctx.quadraticCurveTo(s * br * 0.12, by, s * br * 0.98, by + br * 0.2);
+    ctx.stroke();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+
+  // --- underline rule ------------------------------------------------------
+  ctx.fillStyle = gold;
+  ctx.fillRect(-total * 0.39, R * 0.5, total * 0.78, m(0.05));
+
+  // --- wear ---------------------------------------------------------------
+  // Two passes, because worn court paint does two different things. Abrasion
+  // first *bleaches* the pigment (source-atop, so it stays inside the mark),
+  // and only where the traffic is heaviest does it take the paint off down to
+  // the wood (destination-out). Both are weighted toward the jump-ball circle
+  // and run as short curved pivot arcs, not as noise.
+  const arc = (
+    op: GlobalCompositeOperation,
+    n: number,
+    bias: number,
+    aLo: number,
+    aHi: number,
+    style: string,
+  ) => {
+    ctx.globalCompositeOperation = op;
+    ctx.lineCap = 'round';
+    for (let i = 0; i < n; i++) {
+      const a = rng() * Math.PI * 2;
+      // `bias` < 1 pulls the distribution in toward the centre circle.
+      const rr = Math.pow(rng(), bias) * R * 0.99;
+      const sx = Math.cos(a) * rr;
+      const sy = Math.sin(a) * rr;
+      // Pivots and jump-ball scrambles arc around the centre, so the stroke
+      // direction follows the tangent more often than not.
+      const tang = a + Math.PI * 0.5 + (rng() - 0.5) * 1.5;
+      const len = m(0.1 + rng() * rng() * 0.62);
+      const bend = (rng() - 0.5) * 0.9;
+      ctx.globalAlpha = aLo + rng() * (aHi - aLo);
+      ctx.strokeStyle = style;
+      ctx.lineWidth = m(0.008 + rng() * rng() * 0.05);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(
+        sx + Math.cos(tang) * len * 0.5 - Math.sin(tang) * len * bend,
+        sy + Math.sin(tang) * len * 0.5 + Math.cos(tang) * len * bend,
+        sx + Math.cos(tang) * len,
+        sy + Math.sin(tang) * len,
+      );
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  };
+
+  // Bleached pigment — a warm chalky grey, which is what scuffed paint under
+  // yellowed varnish goes.
+  arc('source-atop', 560, 0.62, 0.04, 0.17, '#b8ac93');
+  // Rubber transferred off soles: darker, tighter, dead centre.
+  arc('source-atop', 240, 0.45, 0.035, 0.12, '#2a2320');
+  // Bare wood, only in the worst of it.
+  arc('destination-out', 230, 0.4, 0.06, 0.3, '#000');
+
+  // A couple of long drag scars right across the mark.
+  ctx.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < 3; i++) {
+    const a = rng() * Math.PI * 2;
+    ctx.globalAlpha = 0.1 + rng() * 0.14;
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = m(0.014 + rng() * 0.02);
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * R, Math.sin(a) * R);
     ctx.quadraticCurveTo(
-      sx + Math.cos(ang) * len * 0.5,
-      sy + Math.sin(ang) * len * 0.5 - len * 0.14,
-      sx + Math.cos(ang) * len,
-      sy + Math.sin(ang) * len,
+      (rng() - 0.5) * R * 0.7,
+      (rng() - 0.5) * R * 0.7,
+      Math.cos(a + 2.2 + rng()) * R,
+      Math.sin(a + 2.2 + rng()) * R,
     );
     ctx.stroke();
   }
-  ctx.restore();
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+
+  // --- edge --------------------------------------------------------------
+  // Kill anything that crept outside the stencil, and hold a 1-texel edge.
+  ctx.globalCompositeOperation = 'destination-in';
+  const edge = ctx.createRadialGradient(0, 0, R * 0.985, 0, 0, R * 0.999);
+  edge.addColorStop(0, '#fff');
+  edge.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = edge;
+  ctx.fillRect(-R, -R, S, S);
+  ctx.globalCompositeOperation = 'source-over';
+
+  return cvs;
 }
 
 /**

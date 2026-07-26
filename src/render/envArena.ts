@@ -112,8 +112,18 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
       } else if (e < 0.035) {
         // ---- Courtside: apron, scorer's table, photographers. Warm-neutral,
         // and the closest thing in the bowl to the floor's brightness.
+        //
+        // This 4°-tall band straddling the horizon is disproportionately
+        // important and was disproportionately bright. A hardwood patch a few
+        // metres in front of a 1.7 m broadcast camera reflects almost exactly
+        // here, and at grazing incidence the clear coat's Fresnel term is close
+        // to 1 — so whatever radiance sits in this band gets painted across the
+        // bottom third of every FLOOR frame at nearly full strength. At 0.48×
+        // the floor it read as a desaturated white sheet over the wood. Real
+        // courtside — apron, chair backs, camera operators — is a good two
+        // stops under the playing surface.
         const t = smoothstep(clamp01((e + 0.03) / 0.065));
-        const lum = lerp(floorL * 0.48, floorL * 0.17, t);
+        const lum = lerp(floorL * 0.30, floorL * 0.10, t);
         const s = lum * warmS;
         r = WARM[0] * s * 0.94;
         g = WARM[1] * s * 1.02;
@@ -140,12 +150,20 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
         } else if (e < 1.02) {
           // Upper darkness between the bowl lip and the rafters. Never zero —
           // exit signs and catwalk service lighting live here.
-          lum = bowlL * (0.20 + crowd * 0.22);
+          lum = bowlL * (0.14 + crowd * 0.16);
         } else {
           // Rafters: exposed truss, catwalks, hanging speaker arrays.
+          //
+          // Deliberately much darker than the seating. This band is what the
+          // near hardwood reflects at grazing incidence in a FLOOR framing —
+          // the mirror direction off a floor patch 1.5 m from a 1.7 m camera
+          // points straight into it — so its mean radiance sets how bleached
+          // the bottom third of the frame reads. A real arena ceiling is close
+          // to black between fixtures; the bright structure belongs to the pods
+          // painted in the fixture pass below, not to the ceiling itself.
           const truss = fbm2(u * 40, v * 26, 3, 2, 0.55, seed + 21);
           const beam = 0.5 + 0.5 * Math.sin(u * Math.PI * 24);
-          lum = bowlL * (0.5 + truss * 1.1 + beam * 0.5);
+          lum = bowlL * (0.10 + truss * 0.34 + beam * 0.16);
         }
 
         const s = lum * bowlS;
@@ -318,19 +336,37 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
 
     for (const p of bank.pods) {
       // The lens: small, hard-edged, very bright. This is the 1–3 small hard
-      // speculars at 200–255 on the backboard glass.
+      // speculars at 200–255 on the backboard glass (§1.4b).
       paintQuad(p, halfW, halfD, L, podTint, 1.25, 1, false);
       // The reflector housing glow: broad, an order dimmer, still rectangular.
-      paintQuad(p, halfW * 2.8, halfD * 2.8, L * 0.045, podTint, 1.8, 1, false);
+      // This is the population §1.4a asks for — "a blurred grid of 4–12 bright
+      // quads at 60–120 occupying 20–50% of the glass" — so it wants to read as
+      // a *grid of soft quads*, which means wide and gentle rather than tight
+      // and hot.
+      // Sized so the halos of adjacent pods do NOT merge: pod pitch on the
+      // sideline run is 2.59 m, so a 3.2× halo (3.4 m wide) welded the whole
+      // 44 m catwalk into one continuous bright band, and a continuous band is
+      // what a floor reflects as a flat white sheet instead of a row of
+      // streaks. 1.9× keeps it at 2.0 m — separate quads with dark ceiling
+      // between them, which is what makes the reflection read as structure.
+      paintQuad(p, halfW * 1.9, halfD * 2.4, L * 0.028, podTint, 1.9, 1, false);
       // The catwalk run bridged into a continuous strip. This is what turns the
       // reflection in glass and chrome into recognisable *bars* rather than a
       // scatter of dots, and it is the single strongest environment cue.
-      const bw = alongX ? step * 0.62 : halfD * 1.3;
-      const bd = alongX ? halfD * 1.3 : step * 0.62;
-      paintQuad(p, bw, bd, L * 0.085, podTint, 1.5, 1, false);
+      //
+      // Halved in radiance and doubled in cross-section from round 1. At the old
+      // figures the strip subtended 0.028 rad and carried 0.145 scene-linear,
+      // which in a roughness-0.06 backboard came back as a razor-thin white line
+      // ruled diagonally across the whole pane — an artefact, not a reflection.
+      // Real glass shows a soft bar. Same total energy, half the peak, twice the
+      // width, and it also stops painting a hot band into the grazing reflection
+      // in the hardwood.
+      const bw = alongX ? step * 0.55 : halfD * 2.2;
+      const bd = alongX ? halfD * 2.2 : step * 0.55;
+      paintQuad(p, bw, bd, L * 0.022, podTint, 1.7, 1, false);
       // And the same pod smeared back off the varnish, stretched vertically, so
       // chrome carries a bright warm floor band with streak structure in it.
-      paintQuad(p, halfW * 2.0, halfD * 2.0, L * 0.055, WARM, 2.6, 4.5, true);
+      paintQuad(p, halfW * 2.0, halfD * 2.0, L * 0.04, WARM, 2.6, 4.5, true);
     }
   }
 

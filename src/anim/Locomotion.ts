@@ -162,6 +162,8 @@ export class GaitBlender {
     }
 
     copyPose(this.out, this.a);
+    // Root offsets are authored in metres at the reference height.
+    this.out.rootOffset.multiplyScalar(heightScale);
     return this.out;
   }
 
@@ -188,8 +190,8 @@ export class GaitBlender {
       sampleClip(this.b, LOCOMOTION.air, this.phase * 0.5);
       blendPose(this.a, this.a, this.b, smoothstep(airW));
     }
-    void heightScale;
     copyPose(this.out, this.a);
+    this.out.rootOffset.multiplyScalar(heightScale);
     return this.out;
   }
 
@@ -199,6 +201,17 @@ export class GaitBlender {
     const force = clamp01(speed / 7.5) * grounded;
     this.applyFoot(this.left, this.phase, 0, stance, grounded);
     this.applyFoot(this.right, this.phase, 0.5, stance, grounded);
+
+    // Standing still, *both* feet are on the floor. Leaving contact purely
+    // phase-driven means a stationary player can sit at a phase where neither
+    // foot is weighted, nothing is pinned, and the first step arrives as a pop.
+    const standing = 1 - smoothstep(clamp01((speed - 0.15) / 0.45));
+    if (standing > 0.001) {
+      for (const f of [this.left, this.right]) {
+        f.contact = Math.max(f.contact, standing * grounded);
+        f.stanceT = Math.min(f.stanceT, 0.2 + (1 - standing) * 0.8);
+      }
+    }
     if (grounded > 0.5 && this.cadence > 0.01) {
       if (crossed(this.prevPhase, this.phase, 0)) this.onPlant?.('left', force);
       if (crossed(this.prevPhase, this.phase, 0.5)) this.onPlant?.('right', force);
@@ -223,7 +236,7 @@ export class GaitBlender {
     // Ramp the weight on at heel strike and off from mid-stance, so the world
     // lock never grabs or releases the foot in a single frame — and so it has
     // let go by the time the heel lifts and the ankle stops being the pivot.
-    foot.contact = smoothstep(u / 0.14) * (1 - smoothstep((u - 0.42) / 0.2)) * grounded;
+    foot.contact = smoothstep(u / 0.07) * (1 - smoothstep((u - 0.5) / 0.22)) * grounded;
   }
 }
 

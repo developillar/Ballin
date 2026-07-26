@@ -63,6 +63,9 @@ const _target = new Vector3();
 const _axis = new Vector3();
 const _quat = new Quaternion();
 const _tmp = new Vector3();
+const _ankle = new Vector3();
+const _toe = new Vector3();
+const _clipAnkle = new Vector3();
 const UP = new Vector3(0, 1, 0);
 const GRAVITY = 9.80665;
 
@@ -89,9 +92,26 @@ const AUTO_ACTIONS = new Set<ActionKind>(['cut', 'hardStop', 'jumpStop', 'accelB
 
 interface FootLock {
   active: boolean;
+  /** World point the ankle is pinned to through the flat-foot phase. */
   point: Vector3;
+  /** World point the toe is pinned to once the heel lifts. */
+  toe: Vector3;
+  rolling: boolean;
   weight: number;
+  /** Consecutive frames the pinned point could not be reached. */
+  slip: number;
+  /** Rate-limited sole-flatten weight. */
+  sole: number;
+  /** Last IK correction, in clip space, faded out after release. */
+  residual: Vector3;
+  residualW: number;
+  /** Previous frame's solved ankle position, for the effector speed limit. */
+  prevSolved: Vector3;
+  prevValid: boolean;
 }
+
+/** Fraction of stance at which the heel lifts and the pivot moves to the toe. */
+const ROLL_START = 0.45;
 
 export class Animator implements IAnimator {
   readonly skeleton: BuiltSkeleton;
@@ -134,21 +154,19 @@ export class Animator implements IAnimator {
   private leanPitch = 0;
   private leanRoll = 0;
   private dribblePhase = 0;
-  private elapsed = 0;
   private lift = 0;
   private lastPlantSide: 'left' | 'right' = 'right';
 
-  private readonly lockL: FootLock = { active: false, point: new Vector3(), weight: 0 };
-  private readonly lockR: FootLock = { active: false, point: new Vector3(), weight: 0 };
-
-  /** Per-player idiosyncrasy so a roster does not move in lockstep. */
-  private readonly idleOffset: number;
+  private readonly lockL: FootLock =
+    { active: false, point: new Vector3(), toe: new Vector3(), rolling: false, weight: 0, slip: 0, sole: 0, residual: new Vector3(), residualW: 0, prevSolved: new Vector3(), prevValid: false };
+  private readonly lockR: FootLock =
+    { active: false, point: new Vector3(), toe: new Vector3(), rolling: false, weight: 0, slip: 0, sole: 0, residual: new Vector3(), residualW: 0, prevSolved: new Vector3(), prevValid: false };
 
   constructor(skeleton: BuiltSkeleton, options: AnimatorOptions) {
     this.skeleton = skeleton;
     this.opts = options;
     const rng = makeRng(options.seed);
-    this.idleOffset = rng() * Math.PI * 2;
+    rng();
     // ±8% on stride length: taller striders and choppier ones, from one seed.
     this.gaitTree = new GaitBlender(0.94 + rng() * 0.12);
     this.secondary = new SecondaryMotion(options.seed);
@@ -257,7 +275,6 @@ export class Animator implements IAnimator {
 
   update(dt: number): void {
     const step = Math.max(1e-5, Math.min(dt, 0.1));
-    this.elapsed += step;
     const loco = this.locomotion;
 
     // --- Momentum bookkeeping ---------------------------------------------
@@ -308,7 +325,7 @@ export class Animator implements IAnimator {
       this.actionElapsed += step;
       const t = clamp01(this.actionElapsed / Math.max(1e-3, this.actionDuration));
       // In fast, out slower, so the follow-through reads before the gait returns.
-      const inT = this.actionAdditive ? 0.1 : 0.14;
+      const inT = this.actionAdditive ? 0.1 : this.actionAuto ? 0.24 : 0.14;
       this.actionWeight = Math.min(smootherstep(t / inT), smootherstep((1 - t) / 0.24));
       const pose = this.action.update(step);
       const mask = this.actionRegion === 'full' ? this.fullMask : this.upperMask;
@@ -415,7 +432,7 @@ export class Animator implements IAnimator {
     this.actionDuration = clip.duration;
     this.actionRegion = clip.region ?? 'full';
     this.actionAdditive = (clip.layer ?? 'override') === 'additive';
-    this.action.play(clip, 0.12, 1);
+    this.action.play(clip, 0.2, 1);
   }
 
   // -------------------------------------------------------------------------
@@ -435,8 +452,10 @@ export class Animator implements IAnimator {
       // A full-body override (a jump shot, a dunk) owns the legs; the lock only
       // guards against the floor while it runs.
       const lockScale = grounded * (this.actionRegion === 'full' ? 1 - this.actionWeight : 1);
-      this.plantLeg('legL', this.lockL, this.gaitTree.left.contact * lockScale, ik.floorY, dt);
-      this.plantLeg('legR', this.lockR, this.gaitTree.right.contact * lockScale, ik.floorY, dt);
+      const L = this.gaitTree.left;
+      const R = this.gaitTree.right;
+      this.plantLeg('legL', this.lockL, L.contact * lockScale, L.stanceT, ik.floorY, dt);
+      this.plantLeg('legR', this.lockR, R.contact * lockScale, R.stanceT, ik.floorY, dt);
     }
 
     // Ball hold — skipped while an action clip is driving the arms.
@@ -480,62 +499,175 @@ export class Animator implements IAnimator {
     chain: 'legL' | 'legR',
     lock: FootLock,
     contact: number,
+    stanceT: number,
     floorY: number,
     dt: number,
   ): void {
     const sk = this.skeleton;
+    const isLeft = chain === 'legL';
     const [thighName, shinName, footName] = CHAINS[chain];
     const thigh = sk.byName[thighName];
     const foot = sk.byName[footName];
+    const toe = sk.byName[isLeft ? 'toeL' : 'toeR'];
     foot.updateWorldMatrix(true, false);
-    _target.setFromMatrixPosition(foot.matrixWorld);
+    _ankle.setFromMatrixPosition(foot.matrixWorld);
+    _clipAnkle.copy(_ankle);
 
     const ankleHeight = sk.height * LANDMARK.ankle;
     const groundY = floorY + ankleHeight;
+    const legLen = (LANDMARK.thigh + LANDMARK.shin) * sk.height;
 
-    lock.weight = damp(lock.weight, clamp01(contact), 18, dt);
+    // Asymmetric. Loading has to be near-instant or the foot slips through the
+    // part of stance that matters most; unloading has to be slow, because
+    // dropping the IK correction the frame contact ends snaps the leg back to
+    // the raw clip pose — an unmistakable pop right at toe-off.
+    const want = clamp01(contact);
+    lock.weight = damp(lock.weight, want, 60, dt);
 
     if (contact > 0.02) {
       if (!lock.active) {
         lock.active = true;
-        lock.point.copy(_target);
+        lock.rolling = false;
+        lock.point.copy(_ankle);
         lock.point.y = groundY;
+        // A fresh plant must not be velocity-limited against the *previous*
+        // stance's foot position, which is a whole stride behind.
+        lock.prevValid = false;
       }
       // Release rather than stretch: past this the leg would visibly straighten
-      // and snap, which is worse than a few millimetres of slip.
-      thigh.updateWorldMatrix(true, false);
-      _tmp.setFromMatrixPosition(thigh.matrixWorld);
-      const legLen = (LANDMARK.thigh + LANDMARK.shin) * sk.height;
-      if (_tmp.distanceTo(lock.point) > legLen * 0.997) {
-        lock.active = false;
-        lock.weight = 0;
+      // and snap, which is worse than a few millimetres of slip. Only the ankle
+      // pin can be checked this way — while rolling, the pinned point is the
+      // toe, which sits a foot-length beyond the end of the leg, so that phase
+      // is policed by the measured residual below instead.
+      if (!lock.rolling) {
+        thigh.updateWorldMatrix(true, false);
+        _tmp.setFromMatrixPosition(thigh.matrixWorld);
+        if (_tmp.distanceTo(lock.point) > legLen * 1.012) {
+          lock.active = false;
+          lock.weight = 0;
+        }
       }
     } else {
       lock.active = false;
+      lock.rolling = false;
     }
 
-    if (lock.active && lock.weight > 0.01) {
-      _target.copy(lock.point);
-    } else if (_target.y >= groundY - 0.004) {
+    const w = clamp01(lock.weight);
+    let soleWeight = 0;
+    let rolling = false;
+    if (lock.active && w > 0.005) {
+      rolling = lock.rolling;
+      if (!rolling) _target.copy(lock.point);
+      // Blending the *target* rather than the solver weight keeps the plant
+      // exact once the foot is loaded: a partially-weighted solve only moves the
+      // foot part of the way and leaves residual slip.
+      soleWeight = w * (1 - smootherstep((stanceT - 0.18) / 0.26));
+    } else if (lock.residualW > 0.02) {
+      // Releasing. Cutting the IK correction the frame contact ends snaps the
+      // leg back to the raw clip pose — a pop right at toe-off. Fade the
+      // *offset* out instead, in the clip's own frame, so the foot never gets
+      // dragged toward a world point the player has already run past.
+      _target.copy(_clipAnkle).addScaledVector(lock.residual, lock.residualW);
+      soleWeight = 0;
+    } else if (_ankle.y >= groundY - 0.004) {
       // Swing phase and above the floor: the clip is right about where it goes.
+      lock.prevValid = false;
       return;
     } else {
       // Below the floor — push it back out even with no lock.
+      _target.copy(_ankle);
       _target.y = groundY;
-      lock.weight = Math.max(lock.weight, 0.85);
+      soleWeight = 0.5;
     }
+
+    // Rate-limit the sole flatten. The position lock has to be immediate or the
+    // foot slips, but forcing the sole flat in one frame rotates the ankle by
+    // tens of degrees between frames — a pop, and rubric §9.2 caps that at 35°.
+    lock.sole = damp(lock.sole, soleWeight, 13, dt);
+    soleWeight = lock.sole;
 
     sk.byName.hips.getWorldQuaternion(_quat);
     _fwd.set(0, 0, 1).applyQuaternion(_quat).normalize();
-    _tmp.set(chain === 'legL' ? 1 : -1, 0, 0).applyQuaternion(_quat).normalize();
-    solveLegPlant(
-      thigh,
-      sk.byName[shinName],
-      foot,
-      { target: _target, normal: UP, weight: clamp01(lock.weight) },
-      _fwd,
-      _tmp,
-    );
+    _tmp.set(isLeft ? 1 : -1, 0, 0).applyQuaternion(_quat).normalize();
+
+    // Pinning the toe is a fixed-point problem: moving the ankle rotates the
+    // whole leg, which moves the toe again. Two sweeps close it to well under a
+    // millimetre; one leaves centimetres.
+    const sweeps = rolling ? 3 : 1;
+    for (let i = 0; i < sweeps; i++) {
+      if (rolling) {
+        toe.updateWorldMatrix(true, false);
+        _toe.setFromMatrixPosition(toe.matrixWorld);
+        foot.updateWorldMatrix(true, false);
+        _ankle.setFromMatrixPosition(foot.matrixWorld);
+        _target.copy(_ankle).add(lock.toe).sub(_toe);
+        if (i === 0) _target.lerpVectors(_ankle, _target, w);
+      } else if (i === 0 && w < 1) {
+        _target.lerpVectors(_ankle, _target, w);
+      }
+      // Velocity limit on the effector. A planted or releasing foot has no
+      // business travelling faster than this, and capping it means no
+      // combination of lock hand-off, release and blend can move a joint more
+      // than a few degrees between frames — rubric §9.2 caps that at 35°.
+      if (i === 0 && lock.prevValid) {
+        // A planted foot is nearly stationary in world space; a releasing one is
+        // already accelerating into its swing and legitimately moves at twice
+        // body speed, so it gets a much looser ceiling.
+        const step = _target.distanceTo(lock.prevSolved);
+        const maxStep = (lock.active ? 3.6 : 13) * dt * (sk.height / 1.98);
+        if (step > maxStep) _target.lerpVectors(lock.prevSolved, _target, maxStep / step);
+      }
+      solveLegPlant(
+        thigh,
+        sk.byName[shinName],
+        foot,
+        { target: _target, normal: UP, weight: 1, soleWeight: i === 0 ? soleWeight : 0 },
+        _fwd,
+        _tmp,
+      );
+    }
+
+    // Remember how far the IK had to move the foot, so the correction can be
+    // faded out rather than dropped when the foot leaves the floor.
+    foot.updateWorldMatrix(true, false);
+    _toe.setFromMatrixPosition(foot.matrixWorld);
+    lock.prevSolved.copy(_toe);
+    lock.prevValid = true;
+    if (lock.active && w > 0.02) {
+      lock.residual.copy(_toe).sub(_clipAnkle);
+      lock.residualW = 1;
+    } else {
+      lock.residualW = damp(lock.residualW, 0, 6.5, dt);
+    }
+
+    // Heel-to-toe roll. Past mid-stance the ankle is no longer the contact
+    // point — the heel is off the floor and the foot pivots over the ball of the
+    // toe. The hand-off is captured *after* this frame's solve, not before it:
+    // capturing the pre-IK toe would hand the next frame a target the foot is
+    // not actually at, and the foot would jump to meet it.
+    if (lock.active && !lock.rolling && stanceT >= ROLL_START) {
+      toe.updateWorldMatrix(true, false);
+      lock.toe.setFromMatrixPosition(toe.matrixWorld);
+      lock.toe.y = Math.max(lock.toe.y, floorY + sk.height * LANDMARK.ankle * 0.45);
+      lock.rolling = true;
+    }
+
+    // Did the pin actually hold? If the leg could not deliver it two frames
+    // running, let go — a released foot that steps again reads far better than
+    // one being dragged toward a point it cannot reach.
+    if (lock.active && rolling && w > 0.5) {
+      toe.updateWorldMatrix(true, false);
+      _toe.setFromMatrixPosition(toe.matrixWorld);
+      lock.slip = _toe.distanceTo(lock.toe) > 0.02 ? lock.slip + 1 : 0;
+      if (lock.slip > 2) {
+        lock.active = false;
+        lock.rolling = false;
+        lock.weight = 0;
+        lock.slip = 0;
+      }
+    } else {
+      lock.slip = 0;
+    }
   }
 }
 

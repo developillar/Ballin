@@ -18,6 +18,35 @@
  *    secondary banks, which is the cheap half of a CSM without having to inject
  *    a cascade selector into every material in the project.
  *
+ * ---------------------------------------------------------------------------
+ * KNOWN BLOCKER, round 2 — no cast shadow reaches the floor in a capture.
+ *
+ * The rig here is not the cause and swapping it does not help. Measured in the
+ * capture harness (`tools/capture.mjs`, SwiftShader), at `high`:
+ *
+ *  - `WebGLShadowMap.render` **is** called every frame and receives 3 shadow
+ *    lights, each with a live 2048² map and `shadow.autoUpdate === true`.
+ *  - three's own `shadow.getFrustum().intersectsObject()` reports **39 of 59
+ *    casters inside the primary cascade** — players, ball and hoop included.
+ *  - `renderer.info.render.calls` does **not move** across the shadow pass:
+ *    zero draws are issued into the map.
+ *  - Forcing `getShadow()` to return a constant darkens the hardwood by 9%, so
+ *    the receiving end — `receiveShadow`, the uniforms, the shader plumbing —
+ *    is wired correctly all the way through. What comes back from the map is
+ *    "lit" because nothing was ever written into it.
+ *  - Three unrelated implementations were tried and all three produce an
+ *    identical, completely shadowless frame: this PCSS chunk over
+ *    `BasicShadowMap`, the stock `PCFShadowMap` path with the chunk override
+ *    removed and a sane `shadow.radius`, and `VSMShadowMap` (which renders to a
+ *    colour target instead of a depth texture). A bug in the filtering here
+ *    could not survive that; the fault is upstream of sampling.
+ *
+ * So this file's PCSS is kept as the correct implementation for when casters
+ * start landing in the map, and the header's penumbra claims are **unverified**
+ * until then. Reproduce with the diagnostics above before changing anything
+ * here — the failure is not in the filter.
+ * ---------------------------------------------------------------------------
+ *
  * Owned by the lighting agent.
  */
 

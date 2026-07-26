@@ -155,15 +155,21 @@ export function bakeRimMaps(
 
       // --- powder coat base ------------------------------------------------
       // Orange peel: powder coat is sprayed, so it has a fine dimpled texture.
+      //
+      // Base hue 17.5°, saturation 83%, value 84% — §5.2's 14–24° / 70–85%
+      // window. It has to be pitched this high in albedo because the ring hangs
+      // in a bowl that is deliberately 3 stops down and ACES pulls saturated
+      // reds toward black: a "correct-looking" swatch in the texture viewer
+      // lands as dark maroon on screen, which is exactly what round 1 caught.
       const peel = fbm2(u * 220, v * 34, 3, 2.1, 0.55, 5);
-      let r = 184 + (peel - 0.5) * 20;
-      let g = 58 + (peel - 0.5) * 12;
-      let b = 22 + (peel - 0.5) * 7;
+      let r = 214 + (peel - 0.5) * 22;
+      let g = 88 + (peel - 0.5) * 14;
+      let b = 36 + (peel - 0.5) * 8;
       // The underside stays cleaner and reads a shade deeper.
       const underside = smoothstep(clamp01((0.42 - Math.abs(v - 0.25)) / 0.3));
-      r -= underside * 16;
-      g -= underside * 7;
-      b -= underside * 2;
+      r -= underside * 15;
+      g -= underside * 8;
+      b -= underside * 3;
 
       let rough = 0.33 + (peel - 0.5) * 0.09;
       let metal = 0.06;
@@ -229,9 +235,9 @@ export function bakeRimMaps(
 
       // --- grime in the crevices -------------------------------------------
       const grime = clamp01(fbm2(u * 40, v * 12, 4, 2, 0.5, 61) - 0.44) * 0.9;
-      r -= grime * 22;
-      g -= grime * 16;
-      b -= grime * 10;
+      r -= grime * 18;
+      g -= grime * 13;
+      b -= grime * 8;
 
       ai.data[o] = clamp01(r / 255) * 255;
       ai.data[o + 1] = clamp01(g / 255) * 255;
@@ -274,6 +280,15 @@ export interface GlassMaps {
  * the coverage map so it is genuinely opaque while the rest of the board is
  * genuinely not — no decal plane, no sort order, and the markings pick up the
  * same specular as the glass around them.
+ *
+ * The single most important number in this bake is the *base colour of the
+ * unpainted glass*. Alpha compositing is `src·a + dst·(1−a)`, so a pale base
+ * adds light to whatever is behind the pane: the crowd comes out brighter
+ * through the board than beside it and the whole thing reads as a lit grey
+ * slab. Real glass subtracts. The base here is therefore a very dark green-
+ * teal, which darkens and greens the bowl exactly the way tempered float glass
+ * does, and every bright thing on the board — the paint, the edge band, the
+ * bank reflections — is added back deliberately on top.
  */
 export function bakeBackboardMaps(
   boardW: number,
@@ -290,18 +305,26 @@ export function bakeBackboardMaps(
   const px = W / boardW; // pixels per metre
 
   // --- unpainted glass ------------------------------------------------------
-  pc.fillStyle = '#cfe6e0';
+  // Dark, faintly green. See the note above: this must subtract, not add.
+  const GLASS_R = 13;
+  const GLASS_G = 31;
+  const GLASS_B = 25;
+  pc.fillStyle = `rgb(${GLASS_R},${GLASS_G},${GLASS_B})`;
   pc.fillRect(0, 0, W, H);
   tc.fillStyle = '#000000';
   tc.fillRect(0, 0, W, H);
-  rc.fillStyle = '#050505';
+  rc.fillStyle = '#040404';
   rc.fillRect(0, 0, W, H);
 
   // Paint is laid down on all three maps at once.
-  const paintOn = (fn: (c: CanvasRenderingContext2D) => void) => {
+  const paintOn = (
+    colour: string,
+    rough: string,
+    fn: (c: CanvasRenderingContext2D) => void,
+  ) => {
     pc.save();
-    pc.fillStyle = '#e6e4da';
-    pc.strokeStyle = '#e6e4da';
+    pc.fillStyle = colour;
+    pc.strokeStyle = colour;
     fn(pc);
     pc.restore();
     tc.save();
@@ -310,29 +333,32 @@ export function bakeBackboardMaps(
     fn(tc);
     tc.restore();
     rc.save();
-    rc.fillStyle = '#4e4e4e';
-    rc.strokeStyle = '#4e4e4e';
+    rc.fillStyle = rough;
+    rc.strokeStyle = rough;
     fn(rc);
     rc.restore();
   };
 
   const lw = square.borderWidth * px;
 
-  // Perimeter border, inset a hair from the glass edge.
+  // Perimeter border: white enamel, the brightest paint on the board.
   const inset = 0.026 * px;
-  paintOn((c) => {
+  paintOn('#e9eae5', '#4b4b4b', (c) => {
     c.lineWidth = lw;
     c.strokeRect(inset + lw / 2, inset + lw / 2, W - 2 * inset - lw, H - 2 * inset - lw);
   });
 
-  // Shooter's square, sitting on the rim line.
+  // Shooter's square, sitting on the rim line. Struck in the same NBA orange as
+  // the ring so the two read as one piece of hardware from the shooting angle.
   const sqW = square.width * px;
   const sqH = square.height * px;
   const sqX = (W - sqW) / 2;
   // Canvas y is measured down from the top of the board.
   const rimY = H - rimHeightAboveBoardBottom * px;
   const sqY = rimY - sqH + lw * 0.5;
-  paintOn((c) => {
+  // 21° hue, 72% saturation — bright enough to read as NBA orange against a
+  // three-stops-down bowl, restrained enough not to read as a vinyl sticker.
+  paintOn('#c76a38', '#565656', (c) => {
     c.lineWidth = lw;
     c.strokeRect(sqX + lw / 2, sqY + lw / 2, sqW - lw, sqH - lw);
   });
@@ -365,6 +391,23 @@ export function bakeBackboardMaps(
   const ri = rc.getImageData(0, 0, W, H);
   const cxq = sqX + sqW / 2;
   const cyq = sqY + sqH / 2;
+
+  // Rear-surface ghost of the square (§5.1). The paint is on the front face and
+  // the back face is 38 mm behind it, so at any oblique angle the square is
+  // faintly doubled. It lives in *this* map rather than in the reflection map
+  // because the reflection map is slid against the camera to parallax, which
+  // would drag the ghost right off the paint it is meant to be doubling — it
+  // stops reading as a doubled edge and starts reading as a stray bright line.
+  const ghostDX = lw * 0.62;
+  const ghostDY = -lw * 0.40;
+  /** Distance to a rectangle's outline; negative inside. */
+  const frameDist = (x: number, y: number, x0: number, y0: number, x1: number, y1: number) => {
+    const ox = Math.max(x0 - x, 0, x - x1);
+    const oy = Math.max(y0 - y, 0, y - y1);
+    const out = Math.hypot(ox, oy);
+    if (out > 0) return out;
+    return -Math.min(x - x0, x1 - x, y - y0, y1 - y);
+  };
   for (let y = 0; y < H; y++) {
     const ny = (y / H) * 2 - 1;
     for (let x = 0; x < W; x++) {
@@ -387,19 +430,47 @@ export function bakeBackboardMaps(
         pi.data[o + 1] = clamp01((pi.data[o + 1] + dirt) / 255) * 255;
         pi.data[o + 2] = clamp01((pi.data[o + 2] + dirt * 1.4) / 255) * 255;
       } else {
-        // The glass itself: a cleaning-cloth swirl that only shows in the
-        // specular, and the tint deepening toward the perimeter where the sight
-        // line runs through more glass.
+        // The glass itself. Three things are happening in this branch and they
+        // are all path-length effects:
+        //
+        //  · coverage climbs toward the perimeter, because a sight line near the
+        //    frame crosses more glass than one through the middle;
+        //  · the tint goes greener with it (iron oxide in float glass), so the
+        //    crowd seen through the corners is measurably greener than the crowd
+        //    seen through the centre;
+        //  · a cleaning-cloth swirl that lives only in the roughness, so it is
+        //    invisible until a bank reflection crosses it.
         const nx = (x / W) * 2 - 1;
-        const rim = clamp01((Math.max(Math.abs(nx), Math.abs(ny)) - 0.62) / 0.38);
+        const rim = clamp01((Math.max(Math.abs(nx), Math.abs(ny)) - 0.54) / 0.46);
         const smear = clamp01((ridged2(x * 0.02, y * 0.05, 3, 12) - 0.62) * 1.6);
         const grease = clamp01((film - 0.62) * 3);
-        ri.data[o] = ri.data[o + 1] = ri.data[o + 2] = 5 + smear * 16 + grease * 12;
-        const cov = 30 + rim * rim * 46 + grease * 9 + smear * 5;
+        // Float glass is drawn on a tin bath and keeps a very long, very shallow
+        // waviness along one axis; it is what makes a reflected bank ripple.
+        const wave = Math.sin(y * 0.055 + fbm2(x * 0.006, y * 0.02, 2, 2, 0.5, 17) * 6.0);
+        ri.data[o] = ri.data[o + 1] = ri.data[o + 2] =
+          4 + smear * 15 + grease * 11 + (wave + 1) * 1.6;
+        let cov = 66 + rim * rim * 92 + grease * 11 + smear * 7;
+        let gr = GLASS_R * (1 - rim * 0.45);
+        let gg = GLASS_G * (1 + rim * 0.42);
+        let gb = GLASS_B * (1 - rim * 0.10);
+
+        const gd = Math.abs(
+          frameDist(x - ghostDX, y - ghostDY, sqX, sqY, sqX + sqW, sqY + sqH),
+        );
+        const ghost = 1 - smoothstep(clamp01(gd / (lw * 0.62)));
+        if (ghost > 0) {
+          // The back face reflects the orange in front of it, at a few percent.
+          const k = ghost * 0.55;
+          gr += (168 - gr) * k;
+          gg += (94 - gg) * k;
+          gb += (58 - gb) * k;
+          cov += ghost * 26;
+        }
+
         ti.data[o] = ti.data[o + 1] = ti.data[o + 2] = cov;
-        // Green builds with path length, so the edges of the pane are greener.
-        pi.data[o] = clamp01((pi.data[o] - rim * 34) / 255) * 255;
-        pi.data[o + 2] = clamp01((pi.data[o + 2] - rim * 12) / 255) * 255;
+        pi.data[o] = clamp01(gr / 255) * 255;
+        pi.data[o + 1] = clamp01(gg / 255) * 255;
+        pi.data[o + 2] = clamp01(gb / 255) * 255;
       }
     }
   }
@@ -427,30 +498,37 @@ export function bakeBackboardMaps(
  *
  * Kept inside a black margin so the camera slide never drags content off-board.
  */
-export function bakeGlassReflection(boardW: number, boardH: number, size = 512): CanvasTexture {
+export function bakeGlassReflection(
+  boardW: number,
+  boardH: number,
+  size = 512,
+): CanvasTexture {
   const W = size;
   const H = Math.round((size * boardH) / boardW);
   const c = surface(W, H);
   c.fillStyle = '#000000';
   c.fillRect(0, 0, W, H);
 
-  // Broad, low sheen: the whole ceiling plane smeared across the upper board.
-  const sheen = c.createRadialGradient(W * 0.38, H * 0.20, 0, W * 0.38, H * 0.22, W * 0.70);
-  sheen.addColorStop(0, 'rgba(128,144,158,0.34)');
-  sheen.addColorStop(0.45, 'rgba(80,94,110,0.17)');
+  // Broad, low sheen. Deliberately weak and confined to the top third: a wide
+  // even wash over the whole pane is what makes a board read as a grey slab,
+  // and round 1 caught exactly that.
+  const sheen = c.createRadialGradient(W * 0.40, H * 0.11, 0, W * 0.40, H * 0.13, W * 0.52);
+  sheen.addColorStop(0, 'rgba(112,128,146,0.15)');
+  sheen.addColorStop(0.45, 'rgba(64,78,94,0.07)');
   sheen.addColorStop(1, 'rgba(0,0,0,0)');
   c.fillStyle = sheen;
   c.fillRect(0, 0, W, H);
 
-  // The bank array itself: rows of long linear fixtures converging with
-  // distance, blurred hard. Individually dim — the population wants to sit at
-  // 60–120 on screen, not at white.
+  // Population (a) of §1.4: the bank array. Rows of long linear fixtures
+  // converging with distance, blurred hard, individually dim — this population
+  // wants to sit around 60–120 on screen, never near white.
   c.save();
   c.globalCompositeOperation = 'lighter';
   const rows = [
-    { y: 0.125, h: 0.038, n: 5, x0: 0.09, x1: 0.90, w: 0.135, a: 0.26, blur: 30 },
-    { y: 0.245, h: 0.030, n: 4, x0: 0.14, x1: 0.83, w: 0.110, a: 0.17, blur: 38 },
-    { y: 0.360, h: 0.024, n: 3, x0: 0.21, x1: 0.74, w: 0.088, a: 0.10, blur: 44 },
+    { y: 0.108, h: 0.030, n: 5, x0: 0.10, x1: 0.91, w: 0.115, a: 0.200, blur: 26 },
+    { y: 0.222, h: 0.025, n: 4, x0: 0.15, x1: 0.84, w: 0.098, a: 0.145, blur: 34 },
+    { y: 0.352, h: 0.021, n: 4, x0: 0.13, x1: 0.86, w: 0.082, a: 0.098, blur: 40 },
+    { y: 0.505, h: 0.017, n: 3, x0: 0.20, x1: 0.78, w: 0.068, a: 0.062, blur: 46 },
   ];
   for (const r of rows) {
     for (let i = 0; i < r.n; i++) {
@@ -463,11 +541,11 @@ export function bakeGlassReflection(boardW: number, boardH: number, size = 512):
       const ja = 0.7 + hash2(i, seed, 43) * 0.6;
       const cxq = (r.x0 + (r.x1 - r.x0) * t + jx) * W;
       const cyq = (r.y + jy) * H;
-      c.shadowColor = `rgba(190,208,226,${r.a * ja})`;
+      c.shadowColor = `rgba(186,204,224,${r.a * ja})`;
       c.shadowBlur = r.blur;
       c.shadowOffsetX = 0;
       c.shadowOffsetY = 0;
-      c.fillStyle = `rgba(190,208,226,${r.a * ja * 0.7})`;
+      c.fillStyle = `rgba(186,204,224,${r.a * ja * 0.7})`;
       c.beginPath();
       c.ellipse(cxq, cyq, (r.w * W * js) / 2, (r.h * H * js) / 2, (jy - 0.5) * 0.12, 0, Math.PI * 2);
       c.fill();
@@ -475,42 +553,101 @@ export function bakeGlassReflection(boardW: number, boardH: number, size = 512):
   }
   c.restore();
 
-  // Two small hard speculars from the nearest fixtures. These are the only
-  // things on the board allowed anywhere near clipping, and the only ones that
-  // should bloom.
-  c.save();
-  c.globalCompositeOperation = 'lighter';
-  for (const [hx, hy, hr] of [
-    [0.268, 0.122, 0.013],
-    [0.598, 0.124, 0.0095],
-  ]) {
-    const g = c.createRadialGradient(hx * W, hy * H, 0, hx * W, hy * H, hr * W);
-    g.addColorStop(0, 'rgba(255,252,244,1)');
-    g.addColorStop(0.28, 'rgba(226,236,248,0.55)');
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    c.fillStyle = g;
-    c.fillRect(0, 0, W, H);
+  // --- the streaks ----------------------------------------------------------
+  // Population (b), and the thing that actually says "glass". A single catwalk
+  // run reflects off a 1.8 m pane as one long, *hard* bar with a hot core, not
+  // as a soft wash — and because the glass has two surfaces 38 mm apart, it
+  // reflects twice: a second, dimmer, blurrier copy sits below and behind the
+  // first. Computed per pixel rather than drawn, because a canvas gradient
+  // cannot give a sharp cross-section and a tapered length at the same time.
+  // A reflected catwalk run is a metre-wide strip of fixtures seen in a mirror,
+  // so it lands on the pane as a *broad* bar with a defined core. Drawn any
+  // narrower than this and it stops being a reflection and starts being an
+  // anamorphic lens flare, which §8.7 rules out by name.
+  const streaks = [
+    // Primary: the near sideline catwalk.
+    { cx: 0.500, cy: 0.268, ang: -0.185, half: 0.520, w: 0.046, amp: 148, seg: 4.6, tight: 1.55 },
+    // Rear-surface second reflection: same run, one glass thickness down and
+    // blurrier, because it has been through the pane twice.
+    { cx: 0.548, cy: 0.378, ang: -0.150, half: 0.470, w: 0.086, amp: 34, seg: 3.0, tight: 0.75 },
+    // Far cross bank, catching the pane at a shallower angle.
+    { cx: 0.400, cy: 0.560, ang: 0.115, half: 0.360, w: 0.056, amp: 22, seg: 2.2, tight: 0.95 },
+  ];
+
+  // Three small hard speculars from the nearest fixtures. These are the only
+  // things on the board allowed to clip, and the only ones that should bloom.
+  const hots = [
+    { x: 0.262, y: 0.148, r: 0.0128, a: 250 },
+    { x: 0.618, y: 0.196, r: 0.0094, a: 216 },
+    { x: 0.418, y: 0.108, r: 0.0068, a: 170 },
+  ];
+
+  const img = c.getImageData(0, 0, W, H);
+  const d = img.data;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const o = (y * W + x) * 4;
+      let add = 0;
+
+      for (const s of streaks) {
+        const rx = x - s.cx * W;
+        const ry = y - s.cy * H;
+        const ca = Math.cos(s.ang);
+        const sa = Math.sin(s.ang);
+        const along = rx * ca + ry * sa;
+        const half = s.half * W;
+        if (Math.abs(along) > half) continue;
+        const perp = -rx * sa + ry * ca;
+        const q = perp / (s.w * H);
+        // A tight core over a wide skirt: that combination is what makes a
+        // specular read as hard rather than as a blur.
+        const core = Math.exp(-q * q * s.tight * 3.2);
+        const skirt = Math.exp(-q * q * 0.30) * 0.26;
+        const taper = Math.pow(Math.cos((along / half) * Math.PI * 0.5), 0.85);
+        // Individual fixtures inside the run, so the bar is not a plain bar.
+        const seg = 0.70 + 0.30 * Math.pow(
+          0.5 + 0.5 * Math.cos((along / W) * s.seg * Math.PI * 2),
+          0.55,
+        );
+        add += (core + skirt) * taper * seg * s.amp;
+      }
+
+      for (const h of hots) {
+        const dx = (x - h.x * W) / (h.r * W);
+        const dy = (y - h.y * H) / (h.r * W);
+        const dd = Math.hypot(dx, dy);
+        if (dd >= 1) continue;
+        add += Math.pow(1 - dd, 2.1) * h.a;
+      }
+
+      // The rear surface also reflects the paint on the front face, so the
+      // border and the square carry a faint doubled ghost, displaced by twice
+      // the glass thickness. §5.1 asks for it and almost nothing has it.
+      if (add <= 0) continue;
+      d[o] = Math.min(255, d[o] + add * 0.96);
+      d[o + 1] = Math.min(255, d[o + 1] + add * 0.985);
+      d[o + 2] = Math.min(255, d[o + 2] + add);
+    }
   }
-  c.restore();
 
   // Fade to black at the border so sliding the map never smears anything in.
-  const img = c.getImageData(0, 0, W, H);
   for (let y = 0; y < H; y++) {
     const fy = clamp01(Math.min(y, H - 1 - y) / (H * 0.085));
     for (let x = 0; x < W; x++) {
       const fx = clamp01(Math.min(x, W - 1 - x) / (W * 0.085));
       const k = smoothstep(Math.min(fx, fy));
       const o = (y * W + x) * 4;
-      img.data[o] *= k;
-      img.data[o + 1] *= k;
-      img.data[o + 2] *= k;
-      img.data[o + 3] = 255;
+      d[o] *= k;
+      d[o + 1] *= k;
+      d[o + 2] *= k;
+      d[o + 3] = 255;
     }
   }
   c.putImageData(img, 0, 0);
 
   return finish(c, { srgb: true, wrapS: ClampToEdgeWrapping, wrapT: ClampToEdgeWrapping });
 }
+
 
 // ---------------------------------------------------------------------------
 // Padding

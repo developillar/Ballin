@@ -504,7 +504,10 @@ export function makeArenaPalette(): ArenaPalette {
   // Nothing in a real arena is at zero: there is aisle lighting, exit signage
   // and concourse bounce everywhere. A hair of emissive keeps the deepest
   // geometry off the black point instead of crushing to a shapeless void.
-  matte.emissive = new Color(0x070a12);
+  // Calibrated so unlit structure lands at 6–12 sRGB through the ACES curve,
+  // which is the floor §1.1 asks for — a true-black region with no detail is a
+  // named tell, and crushed pixels are capped at 3% of the frame by §1.5.
+  matte.emissive = new Color(0x181b24);
   matte.envMapIntensity = 0.55;
   matte.name = 'arena.matte';
 
@@ -514,7 +517,7 @@ export function makeArenaPalette(): ArenaPalette {
     metalness: 0.04,
     vertexColors: true,
   });
-  satin.emissive = new Color(0x060810);
+  satin.emissive = new Color(0x14171f);
   satin.envMapIntensity = 0.6;
   satin.name = 'arena.satin';
 

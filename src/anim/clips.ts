@@ -216,9 +216,18 @@ export interface GaitSpec {
   elbow: number;
   /** Net forward pitch of the trunk, radians. */
   lean: number;
-  /** Pelvis vertical oscillation amplitude, fraction of standing height. */
+  /**
+   * Pelvis vertical oscillation amplitude, **metres at the reference height**
+   * (1.98 m). `Pose.rootOffset` is in metres, so this is too; the blend tree
+   * scales it for shorter or taller players.
+   */
   bounce: number;
-  /** Standing crouch, fraction of height (negative lowers the pelvis). */
+  /**
+   * Standing crouch, metres at the reference height (negative lowers the
+   * pelvis). Set so the authored leg puts the ankle a few millimetres *below*
+   * the floor at contact: a foot that has to be lifted is always solvable, a
+   * foot that has to be stretched to reach is not, and the plant IK releases.
+   */
   crouch: number;
   /** Pelvic obliquity — the swing-side hip drop. */
   list: number;
@@ -392,28 +401,28 @@ export const GAIT_SPECS: readonly GaitSpec[] = [
     name: 'walk',
     refSpeed: 1.35,
     swing: 0.52, extend: 0.9, knee: 0.7, ankle: 0.34, stance: 0.55,
-    arm: 0.16, elbow: 0.34, lean: 0.045, bounce: 0.01, crouch: -0.012,
+    arm: 0.16, elbow: 0.34, lean: 0.045, bounce: 0.01, crouch: -0.018,
     list: 0.05, pelvisYaw: 0.055, shoulderYaw: 0.05,
   },
   {
     name: 'jog',
     refSpeed: 2.9,
     swing: 0.62, extend: 0.82, knee: 1.1, ankle: 0.44, stance: 0.33,
-    arm: 0.36, elbow: 0.72, lean: 0.11, bounce: 0.016, crouch: -0.025,
+    arm: 0.36, elbow: 0.72, lean: 0.11, bounce: 0.02, crouch: -0.02,
     list: 0.07, pelvisYaw: 0.085, shoulderYaw: 0.085,
   },
   {
     name: 'run',
     refSpeed: 5.0,
     swing: 0.78, extend: 0.82, knee: 1.5, ankle: 0.5, stance: 0.25,
-    arm: 0.56, elbow: 0.95, lean: 0.2, bounce: 0.022, crouch: -0.036,
+    arm: 0.56, elbow: 0.95, lean: 0.2, bounce: 0.028, crouch: -0.025,
     list: 0.085, pelvisYaw: 0.115, shoulderYaw: 0.115,
   },
   {
     name: 'sprint',
     refSpeed: 7.9,
     swing: 0.95, extend: 0.8, knee: 1.95, ankle: 0.56, stance: 0.2,
-    arm: 0.8, elbow: 1.22, lean: 0.31, bounce: 0.028, crouch: -0.048,
+    arm: 0.8, elbow: 1.22, lean: 0.31, bounce: 0.036, crouch: -0.032,
     list: 0.095, pelvisYaw: 0.145, shoulderYaw: 0.15,
   },
 ];
@@ -423,7 +432,7 @@ const BACKPEDAL_SPEC: GaitSpec = {
   name: 'backpedal',
   refSpeed: 3.4,
   swing: 0.44, extend: 0.9, knee: 1.05, ankle: 0.5, stance: 0.38,
-  arm: 0.3, elbow: 0.85, lean: -0.05, bounce: 0.014, crouch: -0.055,
+  arm: 0.3, elbow: 0.85, lean: -0.05, bounce: 0.018, crouch: -0.06,
   list: 0.05, pelvisYaw: 0.06, shoulderYaw: 0.06,
   reverse: true,
 };
@@ -479,8 +488,8 @@ const stance = clip('stance', 2.3, true, [
     thighL: [-0.5, 0.34, 0.16], shinL: [0.92, 0, 0], footL: [-0.28, 0.26, 0],
     thighR: [-0.44, -0.32, -0.14], shinR: [0.86, 0, 0], footR: [-0.24, -0.26, 0],
     spine: [0.2, -0.02, 0], chest: [0.13, -0.01, 0], upperChest: [0.08, 0, 0],
-    clavicleL: [0, 0, -0.1], upperArmL: [0.05, -0.1, -0.92], foreArmL: [-0.42, 0, 0], handL: [-0.2, 0, -0.3],
-    clavicleR: [0, 0, 0.1], upperArmR: [0.05, 0.1, 0.92], foreArmR: [-0.42, 0, 0], handR: [-0.2, 0, 0.3],
+    clavicleL: [0, 0, -0.06], upperArmL: [0.16, -0.18, -0.66], foreArmL: [-0.72, 0, 0], handL: [-0.26, 0, -0.34],
+    clavicleR: [0, 0, 0.06], upperArmR: [0.16, 0.18, 0.66], foreArmR: [-0.72, 0, 0], handR: [-0.26, 0, 0.34],
     neck: [-0.12, 0, 0], head: [-0.12, 0.03, 0],
   }, { root: [0, -0.148, 0] }),
   key(0.38, {
@@ -488,8 +497,8 @@ const stance = clip('stance', 2.3, true, [
     thighL: [-0.46, 0.32, 0.15], shinL: [0.88, 0, 0], footL: [-0.26, 0.25, 0],
     thighR: [-0.53, -0.34, -0.16], shinR: [0.96, 0, 0], footR: [-0.3, -0.27, 0],
     spine: [0.23, 0.02, 0], chest: [0.15, 0.01, 0], upperChest: [0.09, 0, 0],
-    clavicleL: [0.02, 0, -0.14], upperArmL: [0.02, -0.14, -1.05], foreArmL: [-0.34, 0, 0], handL: [-0.24, 0, -0.32],
-    clavicleR: [0.02, 0, 0.14], upperArmR: [0.02, 0.14, 1.05], foreArmR: [-0.34, 0, 0], handR: [-0.24, 0, 0.32],
+    clavicleL: [0.02, 0, -0.09], upperArmL: [0.1, -0.24, -0.78], foreArmL: [-0.62, 0, 0], handL: [-0.3, 0, -0.36],
+    clavicleR: [0.02, 0, 0.09], upperArmR: [0.1, 0.24, 0.78], foreArmR: [-0.62, 0, 0], handR: [-0.3, 0, 0.36],
     neck: [-0.13, 0, 0], head: [-0.13, -0.04, 0],
   }, { root: [0, -0.176, 0] }),
   key(0.72, {
@@ -497,8 +506,8 @@ const stance = clip('stance', 2.3, true, [
     thighL: [-0.52, 0.35, 0.16], shinL: [0.95, 0, 0], footL: [-0.29, 0.27, 0],
     thighR: [-0.42, -0.31, -0.13], shinR: [0.83, 0, 0], footR: [-0.23, -0.25, 0],
     spine: [0.19, -0.01, 0], chest: [0.12, 0, 0], upperChest: [0.075, 0, 0],
-    clavicleL: [0, 0, -0.09], upperArmL: [0.07, -0.08, -0.88], foreArmL: [-0.46, 0, 0], handL: [-0.18, 0, -0.28],
-    clavicleR: [0, 0, 0.09], upperArmR: [0.07, 0.08, 0.88], foreArmR: [-0.46, 0, 0], handR: [-0.18, 0, 0.28],
+    clavicleL: [0, 0, -0.05], upperArmL: [0.2, -0.14, -0.6], foreArmL: [-0.8, 0, 0], handL: [-0.22, 0, -0.3],
+    clavicleR: [0, 0, 0.05], upperArmR: [0.2, 0.14, 0.6], foreArmR: [-0.8, 0, 0], handR: [-0.22, 0, 0.3],
     neck: [-0.11, 0, 0], head: [-0.11, 0.05, 0],
   }, { root: [0, -0.142, 0] }),
   key(1, {
@@ -506,8 +515,8 @@ const stance = clip('stance', 2.3, true, [
     thighL: [-0.5, 0.34, 0.16], shinL: [0.92, 0, 0], footL: [-0.28, 0.26, 0],
     thighR: [-0.44, -0.32, -0.14], shinR: [0.86, 0, 0], footR: [-0.24, -0.26, 0],
     spine: [0.2, -0.02, 0], chest: [0.13, -0.01, 0], upperChest: [0.08, 0, 0],
-    clavicleL: [0, 0, -0.1], upperArmL: [0.05, -0.1, -0.92], foreArmL: [-0.42, 0, 0], handL: [-0.2, 0, -0.3],
-    clavicleR: [0, 0, 0.1], upperArmR: [0.05, 0.1, 0.92], foreArmR: [-0.42, 0, 0], handR: [-0.2, 0, 0.3],
+    clavicleL: [0, 0, -0.06], upperArmL: [0.16, -0.18, -0.66], foreArmL: [-0.72, 0, 0], handL: [-0.26, 0, -0.34],
+    clavicleR: [0, 0, 0.06], upperArmR: [0.16, 0.18, 0.66], foreArmR: [-0.72, 0, 0], handR: [-0.26, 0, 0.34],
     neck: [-0.12, 0, 0], head: [-0.12, 0.03, 0],
   }, { root: [0, -0.148, 0] }),
 ], { contactPhase: [0, 0], stanceFraction: 1 });
@@ -523,8 +532,8 @@ function slideCycle(name: string, dir: 1 | -1): Clip {
     thighL: [-0.42, 0.58, 0.2], shinL: [0.8, 0, 0], footL: [-0.24, 0.4, 0],
     thighR: [-0.5, -0.16, -0.06], shinR: [0.96, 0, 0], footR: [-0.3, -0.14, 0],
     spine: [0.19, 0, 0.05], chest: [0.12, 0, 0.03], upperChest: [0.08, 0, 0.02],
-    clavicleL: [0, 0, -0.12], upperArmL: [0.02, -0.16, -1.12], foreArmL: [-0.3, 0, 0], handL: [-0.22, 0, -0.34],
-    clavicleR: [0, 0, 0.08], upperArmR: [0.06, 0.1, 0.8], foreArmR: [-0.44, 0, 0], handR: [-0.18, 0, 0.26],
+    clavicleL: [0, 0, -0.08], upperArmL: [0.08, -0.26, -0.86], foreArmL: [-0.6, 0, 0], handL: [-0.26, 0, -0.38],
+    clavicleR: [0, 0, 0.05], upperArmR: [0.18, 0.14, 0.58], foreArmR: [-0.82, 0, 0], handR: [-0.2, 0, 0.28],
     head: [-0.1, 0, 0],
   };
   const recover: PoseMap = {
@@ -532,8 +541,8 @@ function slideCycle(name: string, dir: 1 | -1): Clip {
     thighL: [-0.5, 0.3, 0.13], shinL: [0.95, 0, 0], footL: [-0.28, 0.24, 0],
     thighR: [-0.44, -0.34, -0.15], shinR: [0.86, 0, 0], footR: [-0.24, -0.26, 0],
     spine: [0.22, 0, 0.02], chest: [0.14, 0, 0.01], upperChest: [0.09, 0, 0],
-    clavicleL: [0, 0, -0.1], upperArmL: [0.04, -0.12, -0.96], foreArmL: [-0.38, 0, 0], handL: [-0.2, 0, -0.3],
-    clavicleR: [0, 0, 0.1], upperArmR: [0.04, 0.12, 0.9], foreArmR: [-0.4, 0, 0], handR: [-0.2, 0, 0.28],
+    clavicleL: [0, 0, -0.06], upperArmL: [0.14, -0.2, -0.7], foreArmL: [-0.7, 0, 0], handL: [-0.24, 0, -0.34],
+    clavicleR: [0, 0, 0.06], upperArmR: [0.14, 0.2, 0.66], foreArmR: [-0.72, 0, 0], handR: [-0.24, 0, 0.32],
     head: [-0.11, 0, 0],
   };
   return clip(name, 1, true, [
@@ -661,10 +670,13 @@ function jumpShot(quality: number, hand: 'left' | 'right', variant: 'set' | 'fad
   const quick = variant === 'quick';
   const dur = quick ? 0.82 : fade ? 1.22 : 1.08;
   const lift = quick ? 0.24 : fade ? 0.3 : 0.34;
-  // Elbow flare is the classic bad-form tell: the upper arm rolls outward.
-  const flare = bad * 0.34;
-  // A rushed shot drifts off the line of the shot.
-  const drift = bad * (fade ? 0.1 : 0.05);
+  // Elbow flare is the classic bad-form tell: the upper arm rolls outward and
+  // the ball comes off the side of the hand instead of the fingertips.
+  const flare = bad * 0.62;
+  // A rushed shot drifts off the line of the shot and lands off-balance.
+  const drift = bad * (fade ? 0.16 : 0.11);
+  // …and the shoulders turn off the target instead of staying square.
+  const skew = bad * 0.22 * s;
 
   const stanceWidth = 0.05 + q * 0.03;
 
@@ -709,10 +721,13 @@ function jumpShot(quality: number, hand: 'left' | 'right', variant: 'set' | 'fad
     hips: [-0.02, -0.02 * s, 0],
     thighL: [-0.2 - (fade ? 0.18 : 0), stanceWidth * 0.8, 0.03], shinL: [0.4, 0, 0], footL: [0.34, 0, 0],
     thighR: [-0.18 - (fade ? 0.18 : 0), -stanceWidth * 0.8, -0.03], shinR: [0.38, 0, 0], footR: [0.34, 0, 0],
-    spine: [fade ? -0.14 : -0.02, -0.02 * s, drift], chest: [fade ? -0.1 : -0.02, -0.02 * s, drift * 0.6],
-    upperChest: [fade ? -0.08 : -0.01, -0.02 * s, drift * 0.4],
+    spine: [fade ? -0.14 : -0.02, -0.02 * s + skew, drift], chest: [fade ? -0.1 : -0.02, -0.02 * s + skew * 0.7, drift * 0.6],
+    upperChest: [fade ? -0.08 : -0.01, -0.02 * s + skew * 0.5, drift * 0.4],
     [shootClav]: [-0.1, 0, 0.06 * s],
-    [shootArm]: [-1.5, -0.06 * s, 0.16 * s + flare], [shootFore]: [-1.92, 0, 0], [shootHand]: [-0.62, 0, 0.1 * s],
+    // A good set point puts the elbow directly under the ball: forearm near
+    // vertical, upper arm rolled *in*. A bad one flares it out to the side.
+    [shootArm]: [-1.5 + bad * 0.34, -0.06 * s, 0.16 * s + flare],
+    [shootFore]: [-1.92 + bad * 0.3, 0, 0], [shootHand]: [-0.62, 0, 0.1 * s],
     [guideArm]: [-1.24, 0.08 * s, -0.42 * s], [guideFore]: [-1.62, 0, 0], [guideHand]: [-0.34, 0, -0.36 * s],
     neck: [-0.12, 0, 0], head: [-0.22, -0.02 * s, 0],
   };
@@ -720,18 +735,20 @@ function jumpShot(quality: number, hand: 'left' | 'right', variant: 'set' | 'fad
   const release: PoseMap = {
     ...setPoint,
     spine: [fade ? -0.2 : -0.05, -0.02 * s, drift], chest: [fade ? -0.14 : -0.04, -0.02 * s, drift * 0.6],
-    [shootArm]: [-2.0 - q * 0.14, -0.04 * s, 0.1 * s + flare * 0.8],
-    [shootFore]: [-0.72 + q * 0.32, 0, 0],
-    [shootHand]: [0.32 + q * 0.36, 0, 0.06 * s],
+    [shootArm]: [-1.86 - q * 0.36, -0.04 * s, 0.1 * s + flare * 0.85],
+    [shootFore]: [-0.96 + q * 0.62, 0, 0],
+    [shootHand]: [0.16 + q * 0.56, 0, 0.06 * s + flare * 0.4],
     [guideArm]: [-1.34, 0.12 * s, -0.56 * s], [guideFore]: [-1.28, 0, 0], [guideHand]: [-0.2, 0, -0.5 * s],
     head: [-0.26, -0.02 * s, 0],
   };
   // Follow-through: fingers hang over the front of the rim, wrist flexed. Held.
   const follow: PoseMap = {
     ...release,
-    [shootArm]: [-2.22 - q * 0.18, -0.02 * s, 0.07 * s + flare * 0.5],
-    [shootFore]: [-0.3 + q * 0.24, 0, 0],
-    [shootHand]: [0.62 + q * 0.42, 0, 0.04 * s],
+    // The follow-through: a confident one holds a long, straight arm with the
+    // wrist snapped over. A poor one collapses back toward the body early.
+    [shootArm]: [-2.02 - q * 0.42, -0.02 * s, 0.07 * s + flare * 0.55],
+    [shootFore]: [-0.62 + q * 0.56, 0, 0],
+    [shootHand]: [0.34 + q * 0.62, 0, 0.04 * s + flare * 0.3],
     [guideArm]: [-1.0, 0.16 * s, -0.66 * s], [guideFore]: [-1.0, 0, 0],
     thighL: [-0.36 - (fade ? 0.22 : 0), stanceWidth * 0.7, 0.03], shinL: [0.62, 0, 0], footL: [0.28, 0, 0],
     thighR: [-0.34 - (fade ? 0.22 : 0), -stanceWidth * 0.7, -0.03], shinR: [0.6, 0, 0], footR: [0.28, 0, 0],
@@ -762,9 +779,10 @@ function jumpShot(quality: number, hand: 'left' | 'right', variant: 'set' | 'fad
   // Feet leave the floor a touch after the drive and land just before `land`.
   const t0 = t.drive + 0.015;
   const t1 = t.reach + 0.04;
+  // A rushed shot drifts laterally and does not land where it took off.
   const rootAt = (u: number, extra = 0): [number, number, number] => [
-    fade ? -drift * 1.4 - (u > t0 ? 0.14 : 0) : 0,
-    arcY(lift, t0, t1, u) + extra,
+    (fade ? -0.14 : 0) * (u > t0 ? 1 : u / Math.max(1e-3, t0)) - drift * 0.55 * clamp01((u - t.dip) / 0.5),
+    arcY(lift * (0.82 + q * 0.22), t0, t1, u) + extra,
     0,
   ];
 
@@ -786,7 +804,9 @@ function jumpShot(quality: number, hand: 'left' | 'right', variant: 'set' | 'fad
     ],
     [
       { t: t.set + 0.02, name: 'apex' },
-      { t: t.rel, name: 'release' },
+      // A poor release leaves the hand early, on the way up rather than at the
+      // top of the jump — which is exactly why it misses.
+      { t: t.rel - bad * 0.05, name: 'release' },
       { t: t.land, name: 'land' },
     ],
     { layer: 'override', region: 'full' },

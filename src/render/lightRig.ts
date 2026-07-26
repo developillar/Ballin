@@ -13,7 +13,7 @@
  */
 
 import { Vector3 } from 'three';
-import { LIGHT_RIG } from '../core/Constants';
+import { COURT, LIGHT_RIG } from '../core/Constants';
 
 export interface RigBank {
   /** Pod centres in world space, in order along the run. */
@@ -107,6 +107,55 @@ export function rigSpotPositions(count: number): Vector3[] {
     const podsOnSide = banks[side].pods;
     const idx = Math.min(podsOnSide.length - 1, Math.round(along * (podsOnSide.length - 1)));
     out.push(podsOnSide[idx].clone());
+  }
+  return out;
+}
+
+/** One aimed pool fixture: where it hangs and where its axis points. */
+export interface PoolAim {
+  readonly from: Vector3;
+  readonly at: Vector3;
+}
+
+/**
+ * Placement for the *pool* — the analytic term that gives the floor its gentle
+ * centre-bright falloff.
+ *
+ * The version this replaces picked six pods straight off `rigSpotPositions`,
+ * which walks the full 44 m catwalk run: two of the six ended up at |x| ≈ 19 m,
+ * outside the playing surface entirely, and every cone was aimed at a different
+ * scattered point. Six 26°-half-angle cones aimed at six scattered points is a
+ * recipe for exactly the failure the rubric names in §10 — readable oval pools
+ * with edges on them.
+ *
+ * The rule now: **every pool fixture is aimed at the court's long axis and every
+ * cone is wide enough to cover the whole floor**, so the cone edge never lands
+ * anywhere near the hardwood and what remains is the smooth `smoothstep`
+ * shoulder that three's spot attenuation gives for free at `penumbra = 1`. Their
+ * sum is a single soft dome over the middle of the court that fades toward the
+ * apron — a falloff, not a pool with a rim.
+ *
+ * Fixtures still alternate sidelines and still hang at the real catwalk height,
+ * so the *direction* the shaping comes from is honest even though the shape
+ * itself is deliberately featureless.
+ */
+export function poolAims(count: number): PoolAim[] {
+  if (count <= 0) return [];
+  const { bankHeight, sideline } = LIGHT_RIG;
+  // Spread across the playing surface, not across the whole catwalk run.
+  const span = COURT.halfLength * 0.78;
+  const out: PoolAim[] = [];
+  for (let i = 0; i < count; i++) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const x = -span + t * span * 2;
+    const z = (i % 2 === 0 ? 1 : -1) * sideline.z;
+    out.push({
+      from: new Vector3(x, bankHeight, z),
+      // Aimed at the long axis, three quarters of the way in from the fixture:
+      // near enough to vertical that the cone is centred on the hardwood, tipped
+      // just enough that the two sidelines cross-light instead of stacking.
+      at: new Vector3(x * 0.55, 0, z * -0.12),
+    });
   }
   return out;
 }

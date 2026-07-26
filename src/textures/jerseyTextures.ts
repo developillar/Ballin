@@ -54,7 +54,7 @@ export const TEAM_KITS: readonly [TeamKit, TeamKit] = [
   {
     name: 'home',
     city: 'BALLIN',
-    base: [226, 224, 219],
+    base: [205, 203, 197],
     ink: [26, 38, 72],
     trim: [176, 138, 66],
     accent: [26, 38, 72],
@@ -64,7 +64,7 @@ export const TEAM_KITS: readonly [TeamKit, TeamKit] = [
   {
     name: 'away',
     city: 'RIVALS',
-    base: [42, 56, 112],
+    base: [46, 60, 116],
     ink: [222, 222, 226],
     trim: [186, 148, 72],
     accent: [150, 44, 52],
@@ -375,13 +375,16 @@ export class KitBaker {
         }
         // Side panel and its piping, running down the outer seam.
         const seam = Math.min(Math.abs(u - 0.25), Math.abs(u - 0.75));
-        const panel = (1 - clamp01((seam - 0.02) / 0.055)) * clamp01((v - 0.12) / 0.08);
+        // A narrow colour panel down the outer seam. Wide enough to read as a
+        // panel at gameplay distance, not so wide it becomes a dark blob on the
+        // thigh of a home white.
+        const panel = (1 - clamp01((seam - 0.008) / 0.028)) * clamp01((v - 0.12) / 0.08);
         if (panel > 0) {
-          r += (ar - r) * panel * 0.8;
-          g2 += (ag - g2) * panel * 0.8;
-          b += (ab - b) * panel * 0.8;
+          r += (ar - r) * panel * 0.55;
+          g2 += (ag - g2) * panel * 0.55;
+          b += (ab - b) * panel * 0.55;
         }
-        const pipe = (1 - clamp01(Math.abs(seam - 0.076) / 0.007)) * clamp01((v - 0.1) / 0.06);
+        const pipe = (1 - clamp01(Math.abs(seam - 0.04) / 0.006)) * clamp01((v - 0.1) / 0.06);
         if (pipe > 0) {
           r += (tr - r) * pipe;
           g2 += (tg - g2) * pipe;

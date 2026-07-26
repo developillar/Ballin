@@ -28,6 +28,7 @@
 
 import {
   CanvasTexture,
+  ClampToEdgeWrapping,
   Color,
   Group,
   HalfFloatType,
@@ -94,22 +95,50 @@ export class CourtSystem implements System {
 
   private readonly uniforms = {
     uMask: { value: null as CanvasTexture | null },
-    uKeyColor: { value: new Color('#274465') },
-    uLineColor: { value: new Color('#e2dbcb') },
+    uLogoMap: { value: null as CanvasTexture | null },
+    uKeyColor: { value: new Color('#22405f') },
+    uLineColor: { value: new Color('#e4ddcc') },
     /** x: paint bleed (texels), y: grain telegraph, z: normal flatten, w: key opacity. */
-    uPaint: { value: new Vector4(0.22, 0.18, 0.72, 0.95) },
+    uPaint: { value: new Vector4(0.22, 0.2, 0.72, 0.95) },
     /** x: board tone amp, y: grain tone amp, z: roughness base, w: roughness range. */
-    uWood: { value: new Vector4(0.1, 1.3, ROUGH_BASE, ROUGH_RANGE) },
-    /** x: board width (m), y: grain→roughness, z/w: spare. */
+    uWood: { value: new Vector4(0.135, 1.55, ROUGH_BASE, ROUGH_RANGE) },
+    /** x: board width (m), y: grain→roughness, z: board grid origin (m), w: spare. */
     uBoard: { value: new Vector4(BOARD_WIDTH, 0.26, 0, 0) },
-    /** Specular shoulder knees: direct, indirect (env), clearcoat. */
-    uSpec: { value: new Vector3(1.7, 2.4, 1.5) },
+    /**
+     * Specular shoulder knees: direct, indirect (env), clearcoat.
+     *
+     * These are asymptotes, in linear radiance, on how bright the *coat* alone
+     * may get. They are the single most important numbers on this material.
+     * The floor is a mirror-bright dielectric under a rig carrying dozens of
+     * hot practicals, and specular is achromatic: let it run and it lays a
+     * white sheet over the maple, which is exactly how hardwood ends up
+     * reading as pale laminate no matter what the albedo says. Held here so
+     * the coat can still go wet-looking without ever outrunning the wood.
+     */
+    uSpec: { value: new Vector3(0.72, 0.34, 0.5) },
+    /**
+     * The varnish tint. Poured polyurethane on maple is amber and several
+     * coats deep, so almost everything the eye reads as "the highlight" has
+     * been through the film twice — down and back — and comes out warm. Only
+     * the thin first-surface term is neutral. Tinting the specular is what
+     * keeps a bank reflection reading as *wet amber floor* instead of as a
+     * grey blowout sitting on top of one.
+     */
+    uCoat: { value: new Color(1.0, 0.925, 0.795) },
     uSdfRange: { value: SDF_RANGE },
     uLogoR: { value: LOGO_RADIUS },
     uReflTex: { value: null as unknown },
     uReflMx: { value: new Matrix4() },
-    /** x: strength, y: roughness→blur, z: max LOD. */
-    uReflParams: { value: new Vector3(0.4, 13, 5) },
+    /**
+     * x: strength at full Fresnel, y: roughness→blur, z: max LOD.
+     *
+     * x is capped well under 1 on purpose. A physical coat really does go
+     * near-mirror at the horizon line, but the planar tap carries none of the
+     * floor's own signal, so at a blend much past ~0.4 the grazing near floor —
+     * the biggest, closest, most scrutinised patch of hardwood in a portrait
+     * frame — loses its grain, its seams and its scuffs and goes smooth.
+     */
+    uReflParams: { value: new Vector3(0.6, 13, 5) },
   };
 
   init(engine: Engine): void {
@@ -123,7 +152,11 @@ export class CourtSystem implements System {
     // the distance fields stay isotropic.
     const mapH = Math.max(256, q.textureSize >> 1);
     const detailSize = Math.max(256, Math.min(1024, q.textureSize >> 1));
-    this.bake = bakeCourt(mapH, detailSize);
+    // The centre mark is ~4 m across and the FLOOR framing magnifies it, so it
+    // gets its own texture at ~190 texels/m rather than the whole-court bake's
+    // ~50 — the difference between a painted logo and a blurred sticker.
+    const logoSize = Math.max(256, Math.min(768, q.textureSize >> 1));
+    this.bake = bakeCourt(mapH, detailSize, logoSize);
 
     const albedo = new CanvasTexture(this.bake.albedo);
     albedo.colorSpace = SRGBColorSpace;
@@ -148,22 +181,44 @@ export class CourtSystem implements System {
     }
     this.uniforms.uMask.value = mask;
 
+    // Sampled analytically off world XZ, so it clamps rather than wraps.
+    const logo = new CanvasTexture(this.bake.logo);
+    logo.colorSpace = SRGBColorSpace;
+    logo.wrapS = logo.wrapT = ClampToEdgeWrapping;
+    logo.anisotropy = engine.anisotropy;
+    logo.minFilter = LinearMipmapLinearFilter;
+    logo.generateMipmaps = true;
+    logo.needsUpdate = true;
+    this.textures.push(logo);
+    this.uniforms.uLogoMap.value = logo;
+
+    // The tiling grain wraps from the -Z edge of the deck, so the analytic
+    // per-board tone has to be phased from the same origin or every tone step
+    // lands mid-board instead of on a seam — which reads as blotching rather
+    // than as plank scatter.
+    this.uniforms.uBoard.value.z = totalD * 0.5;
+
     const mat = new MeshPhysicalMaterial({
       map: albedo,
       normalMap: detail,
-      normalScale: new Vector2(1.25, 1.25),
+      normalScale: new Vector2(1.05, 1.05),
       // Polyurethane, not wood: one smooth interface with a real IOR.
       roughness: 0.11,
       metalness: 0,
       ior: 1.52,
       // Sanding runs with the boards, so the specular lobe is stretched along
       // +U — which is the court's long axis. At roughness ~0.13 that puts the
-      // lobe at ~0.13 across the boards and ~0.33 along them: a 2.5:1 streak.
-      anisotropy: 0.3,
+      // lobe at ~0.12 across the boards and ~0.42 along them: a 3.5:1 streak,
+      // inside §2.3's 2.5:1–6:1.
+      anisotropy: 0.38,
       anisotropyRotation: 0,
-      clearcoat: 0.2,
+      clearcoat: 0.16,
       clearcoatRoughness: 0.1,
-      envMapIntensity: q.floorReflections ? 0.34 : 0.58,
+      // The environment is a whole bright arena and this term is achromatic
+      // and covers every texel of the floor at once, so it is the cheapest way
+      // in the material to bleach the maple. Kept low; the shaped, tinted
+      // planar reflection carries the room instead.
+      envMapIntensity: q.floorReflections ? 0.17 : 0.3,
     });
     mat.name = 'hardwood';
 
@@ -224,12 +279,14 @@ vReflCoord = uReflMx * vec4( vWPos, 1.0 );
         '#include <common>',
         /* glsl */ `#include <common>
 uniform sampler2D uMask;
+uniform sampler2D uLogoMap;
 uniform vec3 uKeyColor;
 uniform vec3 uLineColor;
 uniform vec4 uPaint;
 uniform vec4 uWood;
 uniform vec4 uBoard;
 uniform vec3 uSpec;
+uniform vec3 uCoat;
 uniform float uSdfRange;
 uniform float uLogoR;
 varying vec3 vWPos;
@@ -260,29 +317,63 @@ vec4 courtMask = texture2D( uMask, vMapUv );
 vec4 courtDetail = texture2D( normalMap, vNormalMapUv );
 
 // Per-board tone scatter, computed analytically off world Z so it is crisp at
-// any texel density and phase-locked to the tile's seams. Faded out once a
+// any texel density and phase-locked to the tile's seams (uBoard.z carries the
+// deck's -Z edge, which is where the grain tile wraps from). Faded out once a
 // pixel spans more than a board, which is the only honest way to antialias it.
-float boardCoord = vWPos.z / uBoard.x;
+float boardCoord = ( vWPos.z + uBoard.z ) / uBoard.x;
 float boardFoot = fwidth( boardCoord );
 float boardId = floor( boardCoord );
 float boardTone = ( courtHash( boardId * 1.13 ) - 0.5 ) * 2.0;
 boardTone *= ( courtHash( boardId * 2.71 + 5.3 ) > 0.92 ) ? 2.6 : 1.0;
 boardTone *= uWood.x * smoothstep( 1.7, 0.3, boardFoot );
 
+// Buff and drag marks.
+//
+// The whole-court bake holds the *distribution* of wear — traffic-weighted, so
+// the paint is black with rubber and the corners are clean — but at ~50
+// texels/m a 200 mm scuff is four texels, and the near floor magnifies that
+// bake tenfold, so all of it dissolves into haze exactly where the camera is
+// closest. This resamples the grain tile at a long, shallow, rotated scale to
+// get the high-frequency half back: soft streaks a few hundred millimetres
+// long lying with the direction of play. It lands almost entirely in
+// roughness, because that is what shoe-polished coat actually is — the albedo
+// barely moves and the marks show only as the highlight breaking up over them.
+vec2 buffUv = vec2(
+  vWPos.x * 0.052 + vWPos.z * 0.021,
+  vWPos.z * 0.138 - vWPos.x * 0.0055 );
+float courtBuff = texture2D( normalMap, buffUv ).a - 0.5;
+
 float courtGrain = ( courtDetail.a - 0.5 ) * uWood.y;
-diffuseColor.rgb *= 1.0 + boardTone + courtGrain;
+// Late wood is not just darker maple, it is *browner* maple — the dense
+// summer growth holds more extractive and drinks more of the amber finish. So
+// the grain and the plank scatter are applied with a hue slope: where the wood
+// goes dark it also loses blue and gains red, which is what stops a tonal
+// grain from reading as a grey pencil rubbing over a flat colour.
+vec3 woodTint = vec3( 0.78, 1.0, 1.42 );
+diffuseColor.rgb *= 1.0 + ( boardTone + courtGrain ) * woodTint + courtBuff * 0.075;
 diffuseColor.rgb *= courtMask.a;
 
-float keyPaint = courtEdge( courtMask.r, uSdfRange, uPaint.x ) * uPaint.w;
-float linePaint = courtEdge( courtMask.g, uSdfRange, uPaint.x );
 // Paint is pigment on sanded wood, then varnish. The grain and the scuffs
 // under it still modulate what comes back.
 float telegraph = 1.0 + ( boardTone + courtGrain ) * uPaint.y;
+
+// --- centre logo -------------------------------------------------------
+// Goes down before the line work, so the division line and the centre circle
+// are painted across it exactly as they are on a real deck. Alpha is paint
+// coverage: where the mark has worn through, bare maple comes back with its
+// own grain rather than the logo merely fading toward a lighter flat colour.
+vec2 logoUv = vec2( 0.5 + vWPos.x / ( uLogoR * 2.0 ), 0.5 - vWPos.z / ( uLogoR * 2.0 ) );
+vec4 logoTex = texture2D( uLogoMap, logoUv );
+float logoPaint = logoTex.a *
+  ( 1.0 - smoothstep( uLogoR * 0.985, uLogoR * 1.01, length( vWPos.xz ) ) );
+diffuseColor.rgb = mix( diffuseColor.rgb, logoTex.rgb * telegraph, logoPaint );
+
+float keyPaint = courtEdge( courtMask.r, uSdfRange, uPaint.x ) * uPaint.w;
+float linePaint = courtEdge( courtMask.g, uSdfRange, uPaint.x );
 diffuseColor.rgb = mix( diffuseColor.rgb, uKeyColor * telegraph, keyPaint );
 diffuseColor.rgb = mix( diffuseColor.rgb, uLineColor * telegraph, linePaint );
 
-float logoPaint = 1.0 - smoothstep( uLogoR * 0.985, uLogoR * 1.015, length( vWPos.xz ) );
-float courtPaint = max( max( keyPaint, linePaint ), logoPaint * 0.85 );`,
+float courtPaint = max( max( keyPaint, linePaint ), logoPaint );`,
       )
       .replace(
         '#include <roughnessmap_fragment>',
@@ -291,6 +382,10 @@ roughnessFactor = uWood.z + courtMask.b * uWood.w;
 // Late wood sits fractionally rougher, so the grain modulates the highlight
 // and not only the base colour.
 roughnessFactor += ( 0.5 - courtDetail.a ) * uBoard.y;
+// Sole-polished streaks: rougher where the coat has been abraded, glassier in
+// the lanes nobody walks. Weighted by the bake's own traffic field so it stays
+// out of the corners and off the apron.
+roughnessFactor -= courtBuff * ( 0.09 + courtMask.b * 0.13 );
 // Paint fills the grain: marginally smoother under the same coat.
 roughnessFactor *= mix( 1.0, 0.9, courtPaint );
 roughnessFactor = clamp( roughnessFactor, 0.03, 0.7 );`,
@@ -310,7 +405,27 @@ normal = normalize( mix( normal, nonPerturbedNormal, courtPaint * uPaint.z ) );`
 // highlight keeps its streak shape instead of clipping into a slab.
 reflectedLight.directSpecular /= 1.0 + reflectedLight.directSpecular / uSpec.x;
 reflectedLight.indirectSpecular /= 1.0 + reflectedLight.indirectSpecular / uSpec.y;
+// ...and then tint what is left. Several coats of amber varnish sit between
+// the eye and the maple, so the bulk of the returned specular has been
+// filtered twice on its way down and back. Without this the highlight is pure
+// achromatic white, which desaturates the wood underneath it in proportion to
+// how bright the floor is — i.e. it bleaches hardest exactly where the frame
+// is looking.
+//
+// The tint releases toward neutral as the lobe gets hot, because the two
+// specular terms have different paths: the dim, broad part of the highlight is
+// mostly light that went down through the film and came back, and is doubly
+// filtered; the searing core is the first-surface reflection off the top of
+// the coat, which never entered it and is the colour of the fixture. Holding
+// the amber all the way to the peak also drives §8.3's highlight split well
+// past +12 on any frame the floor dominates.
+reflectedLight.directSpecular *= mix(
+  uCoat, vec3( 1.0 ), saturate( dot( reflectedLight.directSpecular, vec3( 0.9 ) ) ) );
+reflectedLight.indirectSpecular *= mix(
+  uCoat, vec3( 1.0 ), saturate( dot( reflectedLight.indirectSpecular, vec3( 0.9 ) ) ) );
 #ifdef USE_CLEARCOAT
+// The clearcoat lobe stands in for the thin, un-yellowed top surface, so it
+// stays neutral. It is the only genuinely white highlight on the floor.
 clearcoatSpecularDirect /= 1.0 + clearcoatSpecularDirect / uSpec.z;
 #endif`,
       )
@@ -344,13 +459,27 @@ material.clearcoatRoughness = clamp(
   // A varnish reflection carries the *structure* of the room — dark bowl,
   // bright ceiling — not the crowd's shirt colours, which at this blur would
   // read as coloured bruises on the wood.
-  refl = mix( vec3( dot( refl, vec3( 0.2126, 0.7152, 0.0722 ) ) ), refl, 0.55 );
+  float reflLum = dot( refl, vec3( 0.2126, 0.7152, 0.0722 ) );
+  refl = mix( vec3( reflLum ), refl, 0.7 );
+  // Seen through the film, like everything else off this floor — and released
+  // toward neutral in the hot core for the same reason as the direct lobe.
+  refl *= mix( uCoat, vec3( 1.0 ), saturate( reflLum * 2.1 ) );
 
+  // Schlick against a real dielectric coat, not a remapped one. This is the
+  // grazing-angle gain §2.3 asks for: ~4% face-on, climbing toward a mirror at
+  // the horizon line.
   float fres = pow( 1.0 - saturate( dot( geometryNormal, geometryViewDir ) ), 5.0 );
-  float k = uReflParams.x * mix( 0.03, 1.0, fres ) * edge * valid;
+  float k = uReflParams.x * ( 0.035 + 0.965 * fres ) * edge * valid;
   k *= 1.0 - smoothstep( 11.0, 32.0, viewDist );
   k *= saturate( 1.0 - material.roughness * 2.2 );
-  outgoingLight += refl * max( k, 0.0 );
+  // *Blend*, do not add. Adding a mirror image on top of a fully shaded
+  // surface is energy the floor never received, and because the reflected room
+  // is bright and near-neutral it lands as a white sheet over the near
+  // hardwood — the exact grazing angles a broadcast framing spends most of its
+  // pixels on. Replacing the shading instead means the boards genuinely carry
+  // the dark bowl and the bright ceiling, and can never be brighter than the
+  // room they are reflecting.
+  outgoingLight = mix( outgoingLight, refl, saturate( k ) );
 }
 #endif
 #include <opaque_fragment>`,

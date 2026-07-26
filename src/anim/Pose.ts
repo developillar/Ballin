@@ -73,16 +73,28 @@ export function identityPose(dst: Pose): Pose {
   return dst;
 }
 
-/** Spherical blend of two poses into `out`. */
+/**
+ * Spherical blend of two poses into `out`.
+ *
+ * Alias-safe in both directions. That matters more than it sounds: a blend tree
+ * naturally writes `blend(x, y, x, w)` to fold a layer into an accumulator, and
+ * the obvious implementation silently returns `y` for every bone because `out`
+ * and `b` are the same object and `out.copy(a)` has already clobbered it.
+ */
 export function blendPose(out: Pose, a: Pose, b: Pose, t: number): Pose {
   const k = clamp01(t);
   for (let i = 0; i < out.rotations.length; i++) {
-    out.rotations[i].copy(a.rotations[i]).slerp(b.rotations[i], k);
+    _blendQ.copy(b.rotations[i]);
+    out.rotations[i].copy(a.rotations[i]).slerp(_blendQ, k);
   }
-  out.rootOffset.lerpVectors(a.rootOffset, b.rootOffset, k);
+  _blendV.copy(b.rootOffset);
+  out.rootOffset.copy(a.rootOffset).lerp(_blendV, k);
   out.rootYaw = a.rootYaw + (b.rootYaw - a.rootYaw) * k;
   return out;
 }
+
+const _blendQ = new Quaternion();
+const _blendV = new Vector3();
 
 /**
  * Per-bone weighted blend — the *override* path. A jump shot does not ride on
@@ -101,11 +113,13 @@ export function blendPoseMasked(
   const w = clamp01(weight);
   for (let i = 0; i < out.rotations.length; i++) {
     const k = w * (mask ? mask[i] : 1);
+    _blendQ.copy(target.rotations[i]);
     out.rotations[i].copy(base.rotations[i]);
-    if (k > 0.0001) out.rotations[i].slerp(target.rotations[i], k);
+    if (k > 0.0001) out.rotations[i].slerp(_blendQ, k);
   }
   const rw = clamp01(rootWeight);
-  out.rootOffset.lerpVectors(base.rootOffset, target.rootOffset, rw);
+  _blendV.copy(target.rootOffset);
+  out.rootOffset.copy(base.rootOffset).lerp(_blendV, rw);
   out.rootYaw = base.rootYaw + (target.rootYaw - base.rootYaw) * rw;
   return out;
 }
