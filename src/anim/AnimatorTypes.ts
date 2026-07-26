@@ -14,8 +14,15 @@
 import type { Vector3 } from 'three';
 import type { BuiltSkeleton } from '../entities/Skeleton';
 
-/** Discrete one-shot actions. Locomotion is continuous and set separately. */
+/**
+ * Discrete one-shot actions. Locomotion is continuous and set separately.
+ *
+ * The list is append-only: callers that only ever trigger the original set keep
+ * compiling, and the animator falls back to locomotion for any kind it cannot
+ * build a clip for.
+ */
 export type ActionKind =
+  // --- original set -------------------------------------------------------
   | 'shoot'
   | 'jumpShot'
   | 'layup'
@@ -29,7 +36,30 @@ export type ActionKind =
   | 'stepback'
   | 'spin'
   | 'celebrate'
-  | 'dejected';
+  | 'dejected'
+  // --- finishes -----------------------------------------------------------
+  | 'fadeaway'
+  | 'floater'
+  | 'hookShot'
+  | 'fingerRoll'
+  | 'reverseLayup'
+  | 'euroStep'
+  | 'dunkTwoHand'
+  | 'dunkTomahawk'
+  // --- post and passing ---------------------------------------------------
+  | 'postUp'
+  | 'dropStep'
+  | 'overheadPass'
+  // --- defence ------------------------------------------------------------
+  | 'closeout'
+  | 'contest'
+  | 'boxOut'
+  // --- footwork transitions ----------------------------------------------
+  | 'cut'
+  | 'pivot'
+  | 'jumpStop'
+  | 'hardStop'
+  | 'accelBurst';
 
 export interface ActionParams {
   /** World point the action is aimed at — the rim for a shot, a team-mate for a pass. */
@@ -42,6 +72,17 @@ export interface ActionParams {
   hand?: 'left' | 'right';
   /** For dunks: how much hang and reach to commit to. */
   power?: number;
+  /**
+   * Signed direction the move goes, in radians relative to facing. Only the
+   * sign is used today (cut left / cut right, spin direction, euro-step lead).
+   */
+  direction?: number;
+  /** Two-foot gather. Dunks and contests read very differently off one foot. */
+  twoFoot?: boolean;
+  /** Free-form variant selector — `'quick'` shot, `'betweenLegs'` handle, etc. */
+  style?: string;
+  /** Overrides the cross-fade into the action, in seconds. */
+  blendIn?: number;
 }
 
 /** Continuous locomotion intent, refreshed every frame. */
@@ -83,6 +124,10 @@ export interface AnimatorEvents {
   onActionEnd?: (kind: ActionKind) => void;
   /** Peak of a jump — the moment a dunk should attach the ball to the rim. */
   onApex?: (kind: ActionKind) => void;
+  /** The frame a jump's feet retake the floor. Optional; ignore it if unused. */
+  onLand?: (kind: ActionKind) => void;
+  /** The dribble hand reached the ball. `force` is 0..1. */
+  onDribbleTouch?: (hand: 'left' | 'right', force: number) => void;
 }
 
 export interface AnimatorOptions {
@@ -120,4 +165,11 @@ export interface IAnimator {
   /** Cancels any running action and returns to locomotion. */
   cancelAction(): void;
   update(dt: number): void;
+
+  /**
+   * Optional: a physical knock. `dir` is in world space, `strength` 0..1. The
+   * animator turns it into a decaying whole-body reaction on top of whatever
+   * else is playing. Safe to ignore — it is not part of the required contract.
+   */
+  react?(dir: Vector3, strength: number): void;
 }
