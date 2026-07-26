@@ -37,25 +37,107 @@ export class GameSystem implements System {
 
   private ball: BallSystem | null = null;
 
+  /**
+   * The shot currently in the air. A basket is worth two or three depending on
+   * where it was released from, and nothing downstream can work that out from
+   * the ball passing through the ring — so it is recorded at release.
+   */
+  private liveShot: { team: number; shooter: number; three: boolean; touchedRim: boolean } | null = null;
+
+  /** Last whole second announced, so `clockTick` fires once per second. */
+  private lastTick = -1;
+
   init(engine: Engine): void {
     this.ball = engine.get<BallSystem>('ball') ?? null;
-    engine.bus.on('netSwish', () => {
-      this.score.home += 2;
-      engine.bus.emit('scored', {
-        points: 2,
-        team: 0,
-        shooter: 0,
-        swish: true,
-        assisted: null,
-      });
+
+    engine.bus.on('shotReleased', ({ three, shooter }) => {
+      this.liveShot = { team: this.possession, shooter, three, touchedRim: false };
     });
+    engine.bus.on('rimContact', () => {
+      if (this.liveShot) this.liveShot.touchedRim = true;
+    });
+
+    engine.bus.on('netSwish', () => this.resolveMake(engine));
+
+    // A shot that comes down and hits the floor without having gone through is
+    // a miss. Without this, a missed shot never resolves and the shot that
+    // follows is scored against stale state.
+    engine.bus.on('floorBounce', () => {
+      if (this.phase !== 'shot' || !this.liveShot) return;
+      const shot = this.liveShot;
+      this.liveShot = null;
+      this.phase = 'live';
+      engine.bus.emit('missed', { team: shot.team, shooter: shot.shooter, rimContact: shot.touchedRim });
+    });
+  }
+
+  private resolveMake(engine: Engine): void {
+    const shot = this.liveShot;
+    // A ball dropped through the ring outside of a live shot still counts —
+    // the harness does exactly that to stage the swish frame — so fall back to
+    // two for whoever has possession rather than dropping it.
+    const team = shot?.team ?? this.possession;
+    const points = shot?.three ? 3 : 2;
+    const swish = !(shot?.touchedRim ?? false);
+
+    if (team === 0) this.score.home += points;
+    else this.score.away += points;
+
+    this.liveShot = null;
+    this.phase = 'live';
+
+    engine.bus.emit('scored', {
+      points,
+      team,
+      shooter: shot?.shooter ?? 0,
+      swish,
+      assisted: null,
+    });
+
+    // The scoring team gives the ball up.
+    this.changePossession(engine, team === 0 ? 1 : 0);
+  }
+
+  private changePossession(engine: Engine, team: number): void {
+    if (this.possession === team) return;
+    this.possession = team;
+    this.shotClock = RULES.shotClockSeconds;
+    engine.bus.emit('possessionChanged', { team });
   }
 
   simulate(step: number, engine: Engine): void {
     if (this.phase === 'over') return;
+
     this.clock = Math.max(0, this.clock - step);
     this.shotClock = Math.max(0, this.shotClock - step);
-    void engine;
+
+    // One tick per whole second, not one per fixed step — this drives the shot
+    // clock beep, and at 240 Hz an unguarded emit would fire it 240 times.
+    const whole = Math.ceil(this.clock);
+    if (whole !== this.lastTick) {
+      this.lastTick = whole;
+      engine.bus.emit('clockTick', { seconds: whole, shotClock: Math.ceil(this.shotClock) });
+    }
+
+    if (this.shotClock <= 0 && this.phase !== 'shot') {
+      this.changePossession(engine, this.possession === 0 ? 1 : 0);
+      engine.bus.emit('hudToast', { text: 'SHOT CLOCK', kind: 'bad' });
+    }
+
+    if (this.clock <= 0) this.endPeriod(engine);
+  }
+
+  private endPeriod(engine: Engine): void {
+    if (this.quarter >= RULES.quarters) {
+      this.phase = 'over';
+      engine.bus.emit('gameEnd', { home: this.score.home, away: this.score.away });
+      return;
+    }
+    engine.bus.emit('quarterEnd', { quarter: this.quarter });
+    this.quarter++;
+    this.clock = RULES.quarterSeconds;
+    this.shotClock = RULES.shotClockSeconds;
+    this.phase = 'live';
   }
 
   update(dt: number, _alpha: number, engine: Engine): void {

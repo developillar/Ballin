@@ -187,7 +187,7 @@ export class BallSystem implements System {
     s.position.addScaledVector(v, step);
 
     // --- Contacts ---------------------------------------------------------
-    this.collideFloor();
+    this.collideFloor(engine);
     if (this.hoops) {
       for (const basket of this.hoops.baskets) {
         this.collideRim(basket, engine);
@@ -220,7 +220,7 @@ export class BallSystem implements System {
     this.focusPoint.copy(s.position);
   }
 
-  private collideFloor(): void {
+  private collideFloor(engine: Engine): void {
     const s = this.ballState;
     if (s.position.y - BALL.radius > 0) return;
     s.position.y = BALL.radius;
@@ -249,16 +249,11 @@ export class BallSystem implements System {
       s.spin.x += nz * k;
     }
 
-    this.emitBounce(vn);
-  }
-
-  private emitBounce(speed: number): void {
-    if (speed < 0.5) return;
-    // The audio and VFX agents subscribe to these.
-    (globalThis as unknown as { __bus?: { emit: Function } }).__bus?.emit?.('floorBounce', {
-      speed,
-      position: this.ballState.position.clone(),
-    });
+    // Below about half a metre per second the ball is settling rather than
+    // bouncing, and firing dust and a thud for each of those reads as chatter.
+    if (vn >= 0.5) {
+      engine.bus.emit('floorBounce', { speed: vn, position: s.position.clone() });
+    }
   }
 
   /** Torus collision against the ring: the defining contact in basketball. */
