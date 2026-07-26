@@ -72,6 +72,14 @@ const SCENES = {
     await p.evaluate(() => { window.__engine?.get('camera')?.debugPose?.('rim'); window.__engine?.get('game')?.debugScene?.('dunk'); });
     await p.waitForTimeout(400);
   },
+  // A uniform field through the post chain. Everything that is not flat in the
+  // result is something the stack did, which is what makes vignette, grain and
+  // chromatic aberration exactly measurable instead of merely advisory.
+  // Capture it LAST -- it hides the scene, and restoring is only best-effort.
+  flatfield: async (p) => {
+    await p.evaluate(() => window.__flatfield?.(true));
+    await p.waitForTimeout(500);
+  },
 };
 
 async function main() {
@@ -112,6 +120,9 @@ async function main() {
   for (const name of names) {
     const fn = SCENES[name];
     if (!fn) { logs.push(`[capture] unknown scene ${name}`); continue; }
+    // The flat field hides the whole scene, so make sure it is off for anything
+    // that is not itself the flat field, whatever order scenes were asked for.
+    if (name !== 'flatfield') await page.evaluate(() => window.__flatfield?.(false));
     await fn(page);
     await page.waitForTimeout(settle);
     const out = join(dir, `${name}.png`);

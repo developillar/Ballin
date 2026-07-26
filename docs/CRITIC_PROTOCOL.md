@@ -55,6 +55,19 @@ about pebble grain while the exposure is wrong wastes everyone's time.
    before looking at the image. Note every FAIL. WARN lines are advisory —
    the measurement cannot fully separate them from scene content — so confirm
    or dismiss those by eye rather than quoting them as failures.
+
+   To turn the advisory ones into real measurements, capture the `flatfield`
+   scene alongside the rest:
+
+   ```sh
+   node tools/capture.mjs --dist <dist> --port <port> --dir <dir> --scenes gameplay,flatfield
+   ```
+
+   It replaces the scene with a uniform field and runs the post chain over it,
+   so everything that is not flat in the result is something the stack did.
+   Vignette, grain and chromatic aberration are then exact, and `analyze.mjs`
+   enforces them as hard checks on that frame. Anyone reviewing §8 should
+   capture it; without it, a vignette that does not exist reads as a 29% one.
 2. **Squint.** Look at the frame at a glance. Is there a readable light shape?
    Is the bowl dark and the floor bright? Does anything separate from its
    background? A frame that fails here fails, whatever its measurements say.

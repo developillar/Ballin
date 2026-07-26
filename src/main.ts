@@ -11,6 +11,7 @@ import { CameraSystem } from './render/CameraSystem';
 import { HudSystem } from './ui/HudSystem';
 import { AudioSystem } from './audio/AudioSystem';
 import { VfxSystem } from './render/VfxSystem';
+import { FlatField } from './dev/flatfield';
 
 const canvas = document.getElementById('gl') as HTMLCanvasElement;
 const uiRoot = document.getElementById('ui') as HTMLElement;
@@ -57,9 +58,18 @@ async function main(): Promise<void> {
   boot.classList.add('hidden');
 
   // Handles for the screenshot / QA harness.
+  const flatField = new FlatField();
   Object.assign(window as unknown as Record<string, unknown>, {
     __engine: engine,
     __ready: true,
+    /**
+     * Replaces the scene with a uniform field so the review harness can measure
+     * what the post chain does to an image, separately from scene content.
+     */
+    __flatfield: (on: boolean) => {
+      if (on) flatField.enable(engine.scene, uiRoot);
+      else flatField.disable(engine.scene);
+    },
   });
 }
 

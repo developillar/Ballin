@@ -79,6 +79,9 @@ const CHECKS = {
   // through that curve. Hence the scaled band rather than the quoted one.
   edgeDarkerPct: [3, 9, '§8.4 scaled to r≈0.71', true],
   edgeDesatPct: [1, 6, '§8.4 scaled', true],
+  // The rubric's own corner figure, checked as written — but only on a flat
+  // field, where the radial rings are not full of scene content.
+  radialCornerDarkerPct: [10, 22, '§8.4'],
   grainRms: [1.5, 4.0, '§8.5', true],
   shadowBlueMinusRed: [5, 14, '§8.3'],
   highlightRedMinusBlue: [4, 12, '§8.3'],
@@ -89,14 +92,31 @@ const CHECKS = {
 /** True once any measurement has failed a non-advisory check. */
 let failed = false;
 
+/**
+ * Set while analysing a `flatfield.png`. On a flat field there is no scene
+ * content to confound the grade measurements, so the checks that are normally
+ * advisory become exact and are enforced. That is the entire point of
+ * capturing one.
+ */
+let exactGrade = false;
+
+/**
+ * Checks that are meaningless on a flat field and must not be run there. The
+ * flat-field frame is *supposed* to be featureless, so the "no large flat
+ * field" test would fail it by design.
+ */
+const SKIP_ON_FLATFIELD = new Set(['flattestStddev']);
+
 function verdict(key, value) {
   const range = CHECKS[key];
   if (!range || value === null || value === undefined) return '';
+  if (exactGrade && SKIP_ON_FLATFIELD.has(key)) return '(n/a on a flat field)';
   const [lo, hi, ref, advisory] = range;
+  const soft = advisory && !exactGrade;
   const ok = (lo === null || value >= lo) && (hi === null || value <= hi);
-  if (!ok && !advisory) failed = true;
+  if (!ok && !soft) failed = true;
   const bound = `${lo === null ? '' : lo}${lo !== null && hi !== null ? '–' : ''}${hi === null ? '+' : hi}`;
-  const mark = ok ? 'PASS' : advisory ? 'WARN' : 'FAIL';
+  const mark = ok ? 'PASS' : soft ? 'WARN' : 'FAIL';
   return `${mark}  (target ${bound}, ${ref})`;
 }
 
@@ -154,8 +174,15 @@ function analyse(path) {
 }
 
 function report(m) {
+  // A frame named flatfield is a post-chain test pattern, not a game frame:
+  // the grade checks become exact and the flat-field check does not apply.
+  exactGrade = /flatfield/i.test(m.file);
+
   const L = [];
   L.push(`\n=== ${m.file}  ${m.size[0]}x${m.size[1]} ===`);
+  if (exactGrade) {
+    L.push('flat-field test pattern — grade checks are exact here, scene checks do not apply');
+  }
   L.push(
     `frame        mean ${m.whole.mean}  sd ${m.whole.stddev}  p01 ${m.whole.p01}  p50 ${m.whole.p50}  p99 ${m.whole.p99}  max ${m.whole.max}`,
   );
@@ -177,6 +204,12 @@ function report(m) {
   );
   L.push(`vignette     edges ${m.vignette.edgeDarkerPct}% darker  ${verdict('edgeDarkerPct', m.vignette.edgeDarkerPct)}`);
   L.push(`             edges ${m.vignette.edgeDesatPct}% desat   ${verdict('edgeDesatPct', m.vignette.edgeDesatPct)}`);
+  if (exactGrade) {
+    L.push(
+      `             corner ${m.vignette.radialCornerDarkerPct}% darker  ` +
+        verdict('radialCornerDarkerPct', m.vignette.radialCornerDarkerPct),
+    );
+  }
   L.push(`  radial     ` + m.vignette.profile.map((p) => `${p.r}:${p.mean}`).join('  '));
   L.push(
     `grade split  shadows B-R ${m.colorSplit.shadows.blueMinusRed} (hue ${m.colorSplit.shadows.hue}, sat ${m.colorSplit.shadows.meanSat})  ` +

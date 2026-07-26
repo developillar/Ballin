@@ -383,11 +383,21 @@ export function vignette(img, rings = 8) {
   // mid-height, which on the normalised ellipse is r ≈ 0.71, not the corner at
   // r = 1.0. So this is edge falloff, and the rubric's corner figure has to be
   // read through a smooth vignette curve to compare — see EDGE_TARGET below.
+  const centreRing = profile[0].mean;
+  const cornerRing = profile[rings - 1].mean;
+
   return {
     profile,
     method: 'per-row horizontal edge/centre median, sampled at r≈0.71',
     edgeDarkerPct: lumRatio === null ? null : +((1 - lumRatio) * 100).toFixed(1),
     edgeDesatPct: satRatio === null ? null : +((1 - satRatio) * 100).toFixed(1),
+    /**
+     * True corner falloff, r = 1.0 against the centre. Only meaningful on a
+     * uniform frame: on an arena frame the rings mix bright floor with dark
+     * bowl and this number describes the composition, not the lens.
+     */
+    radialCornerDarkerPct:
+      centreRing && cornerRing !== null ? +(((centreRing - cornerRing) / centreRing) * 100).toFixed(1) : null,
   };
 }
 
