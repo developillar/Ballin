@@ -141,3 +141,39 @@ export function basketX(side: 1 | -1): number {
 
 export const TEAM_HOME = 0;
 export const TEAM_AWAY = 1;
+
+/**
+ * Overhead lighting rig. Added by the lighting agent so the arena's rafters,
+ * catwalks and truss work can be hung around exactly the fixtures that the
+ * light rig — and the baked environment map — are using. Purely additive: no
+ * existing constant changes.
+ *
+ * Real NBA arenas light the floor from two long catwalk runs parallel to the
+ * sidelines, roughly 17–18 m up, with the fixtures aimed steeply down so the
+ * playing surface gets 1500–2000 lux while the bowl is held several stops
+ * under. The layout below is that plot, expressed in court coordinates.
+ */
+export const LIGHT_RIG = {
+  /**
+   * Catwalk / fixture plane. Mirrors `ARENA.riggingY` in
+   * `src/world/arenaGeometry.ts` — the arena hangs the visible truss, catwalks
+   * and emissive pods here, and the analytic rig plus the environment bake put
+   * their emitters at the same coordinates so a highlight in the backboard
+   * belongs to a fixture that is physically in the room.
+   */
+  bankHeight: 17.8,
+  /** The two long sideline runs, over the +Z and -Z catwalks. */
+  sideline: { z: 10.8, length: 44, pods: 18 },
+  /** Shorter cross banks over each basket. */
+  cross: { x: 11.6, length: 15, pods: 6, drop: 1.1 },
+  /** Outer wash over the lower bowl — keeps the crowd off pure black. */
+  wash: { z: 22, length: 40, pods: 9, rise: 1.2 },
+  /** A single fixture pod's lens. */
+  pod: { width: 1.05, depth: 0.78 },
+  /** Bank colour temperature — broadcast neutral. */
+  kelvin: 5600,
+  /** Height of the LED ribbon band around the lip of the lower bowl. */
+  ribbonHeight: 3.2,
+  /** Jumbotron hangs over centre court. */
+  jumbotron: { centreHeight: 17.4, width: 7.4, depth: 5.2, faceHeight: 3.2 },
+} as const;

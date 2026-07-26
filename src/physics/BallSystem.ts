@@ -7,16 +7,18 @@
  */
 
 import {
+  Color,
   Group,
   Mesh,
   MeshPhysicalMaterial,
   Quaternion,
-  SphereGeometry,
+  Vector2,
   Vector3,
 } from 'three';
 import type { Engine, System } from '../core/Engine';
 import { BALL, COURT, HOOP, PHYSICS } from '../core/Constants';
 import { clamp } from '../core/MathX';
+import { bakeBallMaps, makeBallGeometry, type BallMapSet } from '../textures/ballTextures';
 import type { HoopSystem, Basket } from '../world/Hoop';
 
 export type BallOwner = { kind: 'free' } | { kind: 'held'; player: number } | { kind: 'shot'; by: number };
@@ -60,26 +62,73 @@ export class BallSystem implements System {
   private prevPosition = new Vector3();
   private hoops: HoopSystem | null = null;
   private aboveRim = new Map<Basket, boolean>();
+  private maps: BallMapSet | null = null;
 
   init(engine: Engine): void {
     this.group.name = 'ball';
     engine.scene.add(this.group);
     this.hoops = engine.get<HoopSystem>('hoop') ?? null;
 
-    // Placeholder material — the ball agent replaces this with the full
-    // pebbled-leather PBR set (albedo / normal / roughness / AO).
-    const mat = new MeshPhysicalMaterial({
-      color: 0xc4581f,
-      roughness: 0.78,
-      metalness: 0,
-      clearcoat: 0.18,
-      clearcoatRoughness: 0.6,
-      envMapIntensity: 0.9,
+    // --- cover ------------------------------------------------------------
+    // A quarter of the tier's atlas budget per cube face: at `high` that is a
+    // 1536x1024 three-map set (~25 MB with mips), at `medium` 768x512 (~6 MB).
+    // Feature sizes in the bake are physical, so dropping a tier costs
+    // sharpness and nothing else.
+    const cell = Math.max(128, Math.min(512, engine.quality.textureSize >> 2));
+    const maps = bakeBallMaps({
+      radius: BALL.radius,
+      cell,
+      anisotropy: engine.anisotropy,
     });
-    this.mesh = new Mesh(new SphereGeometry(BALL.radius, 64, 48), mat);
+    this.maps = maps;
+
+    const mat = new MeshPhysicalMaterial({
+      map: maps.albedo,
+      // Pebble domes and the recessed channels both live here; the base
+      // roughness/metalness are the multipliers the packed ORM modulates.
+      normalMap: maps.normal,
+      normalScale: new Vector2(1, 1),
+      roughnessMap: maps.orm,
+      aoMap: maps.orm,
+      aoMapIntensity: 0.85,
+      roughness: 1,
+      metalness: 0,
+      // Leather is a multi-lobe material and getting the mix right is the whole
+      // difference between "leather" and "plastic toy":
+      //  - a broad body lobe from the roughness map,
+      //  - a thin, low-intensity clear coat that only shows near grazing,
+      //  - a warm Charlie sheen that is invisible face-on and lifts the
+      //    silhouette hard, which is exactly how a tacky game ball behaves.
+      clearcoat: 0.18,
+      clearcoatRoughness: 0.32,
+      clearcoatNormalMap: maps.normal,
+      clearcoatNormalScale: new Vector2(0.55, 0.55),
+      sheen: 0.55,
+      sheenRoughness: 0.74,
+      // Warm and saturated rather than white, so the grazing lift reads as
+      // light on leather instead of bleaching the hue out at the silhouette.
+      sheenColor: new Color(0xff9a4a),
+      // Slightly soft F0 — game leather is tacky, not varnished.
+      specularIntensity: 0.72,
+      envMapIntensity: 1.0,
+    });
+
+    // Cube sphere: no pole fan, no meridian seam, near-uniform texel density
+    // and a clean per-face tangent frame for the normal map.
+    const segments = [14, 18, 22][engine.quality.playerDetail] ?? 18;
+    this.mesh = new Mesh(makeBallGeometry(BALL.radius, segments, cell), mat);
+    this.mesh.name = 'ballCover';
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
+    this.mesh.frustumCulled = false;
     this.group.add(this.mesh);
+
+    // A ball that starts perfectly axis-aligned reads as a texture-mapped
+    // sphere; kicking it off-axis puts the channel cross somewhere believable.
+    this.ballState.orientation.setFromAxisAngle(
+      _tmp.set(0.31, 0.86, 0.41).normalize(),
+      0.9,
+    );
 
     this.prevPosition.copy(this.ballState.position);
   }
@@ -309,10 +358,30 @@ export class BallSystem implements System {
     }
   }
 
-  update(_dt: number, alpha: number): void {
+  update(_dt: number, alpha: number, engine: Engine): void {
     const s = this.ballState;
     // Render-time interpolation between the last two fixed steps.
     this.mesh.position.lerpVectors(this.prevPosition, s.position, clamp(alpha, 0, 1));
     this.mesh.quaternion.copy(s.orientation);
+
+    // Speed-adaptive micro-detail. A shot ball covers a quarter of its own
+    // diameter per frame; without per-object motion blur a razor-sharp pebble
+    // and a tight coat highlight make it read as a pasted sprite. Broadening
+    // the coat lobe and easing off the normal map as speed rises buys most of
+    // the same read for the cost of two uniforms — and on `high`, where the
+    // post stack does blur, the effect is scaled right back.
+    const mat = this.mesh.material as MeshPhysicalMaterial;
+    const k = clamp(s.velocity.length() / 9, 0, 1) * (engine.quality.motionBlur ? 0.35 : 1);
+    mat.clearcoatRoughness = 0.32 + 0.26 * k;
+    const n = 1 - 0.45 * k;
+    mat.normalScale.set(n, n);
+    mat.clearcoatNormalScale.set(0.55 * n, 0.55 * n);
+  }
+
+  dispose(): void {
+    this.mesh?.geometry.dispose();
+    (this.mesh?.material as MeshPhysicalMaterial | undefined)?.dispose();
+    this.maps?.dispose();
+    this.maps = null;
   }
 }

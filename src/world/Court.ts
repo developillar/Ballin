@@ -1,26 +1,67 @@
 /**
- * The hardwood: floor slab, procedurally milled maple with parquet run
- * direction, painted keys and lines, centre logo, and the glossy clear-coat
- * that gives the court its signature reflections.
+ * The hardwood.
  *
- * Owned by the court agent — everything from the albedo bake to the varnish
- * roughness map lives here.
+ * A broadcast NBA floor is not a wood texture on a plane. It is 2-1/4 in
+ * milled maple strips with staggered butt joints, buried under several coats
+ * of high-gloss polyurethane that were sanded along the boards — which is why
+ * the floor looks *wet* on television and why the overhead banks smear into
+ * long grain-aligned streaks rather than round dots. The paint is under that
+ * coat, not on it, so a highlight crossing the sideline never changes shape.
+ *
+ * The material here is built to reproduce exactly that:
+ *
+ *  - a whole-court bake (albedo + wear + two signed distance fields for the
+ *    line work + a coat-roughness field + AO) from `courtBake`;
+ *  - a tiling maple detail texture carrying grain and seams in a real height
+ *    field, converted to a tangent-space normal map, so the milling catches
+ *    light instead of being painted on;
+ *  - a single anisotropic specular lobe standing in for the varnish (the wood
+ *    beneath is buried in resin, so there is physically only one interface),
+ *    with a light clearcoat over it for the second, tighter lobe;
+ *  - a planar reflection rendered from a mirrored camera on the tiers that can
+ *    afford it, blurred by roughness and distance, stretched along the boards,
+ *    with a Fresnel gain that goes near-mirror at grazing angles. Below that
+ *    tier the same code path falls back to the PMREM environment alone.
+ *
+ * Owned by the court agent.
  */
 
 import {
   CanvasTexture,
+  Color,
   Group,
+  HalfFloatType,
   LinearMipmapLinearFilter,
+  LinearSRGBColorSpace,
+  Matrix4,
   Mesh,
   MeshPhysicalMaterial,
+  PerspectiveCamera,
+  Plane,
   PlaneGeometry,
   RepeatWrapping,
   SRGBColorSpace,
+  Vector2,
   Vector3,
+  Vector4,
+  WebGLRenderTarget,
+  type Camera,
+  type Scene,
+  type WebGLRenderer,
 } from 'three';
 import type { Engine, System } from '../core/Engine';
 import { COURT } from '../core/Constants';
-import { clamp01, fbm2, makeRng, ridged2 } from '../core/MathX';
+import {
+  bakeCourt,
+  LOGO_RADIUS,
+  ROUGH_BASE,
+  ROUGH_RANGE,
+  SDF_RANGE,
+  type CourtBake,
+} from '../textures/courtBake';
+import { BOARD_WIDTH, TILE_LENGTH, TILE_WIDTH } from '../textures/courtWood';
+
+const MIRROR_PLANE = new Plane(new Vector3(0, 1, 0), 0);
 
 export class CourtSystem implements System {
   readonly name = 'court';
@@ -28,312 +69,430 @@ export class CourtSystem implements System {
 
   group = new Group();
   floor!: Mesh;
+  material!: MeshPhysicalMaterial;
+
+  /** Playing surface height. The milled relief is sub-millimetre and normal-map only. */
+  readonly surfaceY = 0;
+
+  private engine!: Engine;
+  private bake!: CourtBake;
+  private textures: CanvasTexture[] = [];
+
+  // --- planar reflection ---
+  private reflectionRT: WebGLRenderTarget | null = null;
+  private reflectCamera = new PerspectiveCamera();
+  private reflectEvery = 1;
+  private reflecting = false;
+  private lastReflectFrame = -1;
+  private readonly _pos = new Vector3();
+  private readonly _look = new Vector3();
+  private readonly _up = new Vector3();
+  private readonly _rot = new Matrix4();
+  private readonly _plane = new Plane();
+  private readonly _clip = new Vector4();
+  private readonly _q = new Vector4();
+
+  private readonly uniforms = {
+    uMask: { value: null as CanvasTexture | null },
+    uKeyColor: { value: new Color('#274465') },
+    uLineColor: { value: new Color('#e2dbcb') },
+    /** x: paint bleed (texels), y: grain telegraph, z: normal flatten, w: key opacity. */
+    uPaint: { value: new Vector4(0.22, 0.18, 0.72, 0.95) },
+    /** x: board tone amp, y: grain tone amp, z: roughness base, w: roughness range. */
+    uWood: { value: new Vector4(0.1, 1.3, ROUGH_BASE, ROUGH_RANGE) },
+    /** x: board width (m), y: grain→roughness, z/w: spare. */
+    uBoard: { value: new Vector4(BOARD_WIDTH, 0.26, 0, 0) },
+    /** Specular shoulder knees: direct, indirect (env), clearcoat. */
+    uSpec: { value: new Vector3(1.7, 2.4, 1.5) },
+    uSdfRange: { value: SDF_RANGE },
+    uLogoR: { value: LOGO_RADIUS },
+    uReflTex: { value: null as unknown },
+    uReflMx: { value: new Matrix4() },
+    /** x: strength, y: roughness→blur, z: max LOD. */
+    uReflParams: { value: new Vector3(0.4, 13, 5) },
+  };
 
   init(engine: Engine): void {
+    this.engine = engine;
     this.group.name = 'court';
     engine.scene.add(this.group);
 
-    const size = engine.quality.textureSize;
-    const albedo = this.bakeAlbedo(size);
-    const rough = this.bakeRoughness(size >> 1);
+    const q = engine.quality;
+    // The whole-court map is always magnified in play, so height (across the
+    // boards) is what buys line crispness; width follows the real aspect so
+    // the distance fields stay isotropic.
+    const mapH = Math.max(256, q.textureSize >> 1);
+    const detailSize = Math.max(256, Math.min(1024, q.textureSize >> 1));
+    this.bake = bakeCourt(mapH, detailSize);
 
+    const albedo = new CanvasTexture(this.bake.albedo);
     albedo.colorSpace = SRGBColorSpace;
-    for (const t of [albedo, rough]) {
+
+    const mask = new CanvasTexture(this.bake.mask);
+    mask.colorSpace = LinearSRGBColorSpace;
+
+    const detail = new CanvasTexture(this.bake.detail.canvas);
+    detail.colorSpace = LinearSRGBColorSpace;
+
+    const totalW = COURT.length + COURT.apronX * 2;
+    const totalD = COURT.width + COURT.apronZ * 2;
+    detail.repeat.set(totalW / TILE_LENGTH, totalD / TILE_WIDTH);
+
+    for (const t of [albedo, mask, detail]) {
       t.wrapS = t.wrapT = RepeatWrapping;
       t.anisotropy = engine.anisotropy;
       t.minFilter = LinearMipmapLinearFilter;
       t.generateMipmaps = true;
       t.needsUpdate = true;
+      this.textures.push(t);
     }
+    this.uniforms.uMask.value = mask;
 
     const mat = new MeshPhysicalMaterial({
       map: albedo,
-      roughnessMap: rough,
-      roughness: 1,
+      normalMap: detail,
+      normalScale: new Vector2(1.25, 1.25),
+      // Polyurethane, not wood: one smooth interface with a real IOR.
+      roughness: 0.11,
       metalness: 0,
-      clearcoat: 0.86,
-      clearcoatRoughness: 0.09,
-      reflectivity: 0.42,
-      envMapIntensity: 0.72,
+      ior: 1.52,
+      // Sanding runs with the boards, so the specular lobe is stretched along
+      // +U — which is the court's long axis. At roughness ~0.13 that puts the
+      // lobe at ~0.13 across the boards and ~0.33 along them: a 2.5:1 streak.
+      anisotropy: 0.3,
+      anisotropyRotation: 0,
+      clearcoat: 0.2,
+      clearcoatRoughness: 0.1,
+      envMapIntensity: q.floorReflections ? 0.34 : 0.58,
     });
+    mat.name = 'hardwood';
 
-    const w = COURT.length + COURT.apronX * 2;
-    const d = COURT.width + COURT.apronZ * 2;
-    const geo = new PlaneGeometry(w, d, 1, 1);
+    if (q.floorReflections && q.reflectionResolution > 0) {
+      mat.defines = { ...(mat.defines ?? {}), USE_PLANAR_REFLECTION: '' };
+      this.reflectEvery = q.tier === 'medium' ? 2 : 1;
+      this.buildReflectionTarget(engine);
+    }
+    mat.onBeforeCompile = (shader) => this.patch(shader);
+    mat.customProgramCacheKey = () => 'ballin-hardwood-1';
+    this.material = mat;
+
+    const geo = new PlaneGeometry(totalW, totalD, 24, 14);
     geo.rotateX(-Math.PI / 2);
     this.floor = new Mesh(geo, mat);
     this.floor.receiveShadow = true;
+    this.floor.castShadow = false;
     this.floor.name = 'hardwood';
+    this.floor.matrixAutoUpdate = false;
+    this.floor.updateMatrix();
+    this.floor.onBeforeRender = (renderer, scene, camera) =>
+      this.renderReflection(renderer, scene, camera);
     this.group.add(this.floor);
   }
 
+  // -------------------------------------------------------------------------
+  // Shader
+  // -------------------------------------------------------------------------
+
+  private patch(shader: {
+    uniforms: Record<string, { value: unknown }>;
+    vertexShader: string;
+    fragmentShader: string;
+  }): void {
+    Object.assign(shader.uniforms, this.uniforms);
+
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        /* glsl */ `#include <common>
+varying vec3 vWPos;
+#ifdef USE_PLANAR_REFLECTION
+uniform mat4 uReflMx;
+varying vec4 vReflCoord;
+#endif`,
+      )
+      .replace(
+        '#include <project_vertex>',
+        /* glsl */ `#include <project_vertex>
+vWPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+#ifdef USE_PLANAR_REFLECTION
+vReflCoord = uReflMx * vec4( vWPos, 1.0 );
+#endif`,
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        /* glsl */ `#include <common>
+uniform sampler2D uMask;
+uniform vec3 uKeyColor;
+uniform vec3 uLineColor;
+uniform vec4 uPaint;
+uniform vec4 uWood;
+uniform vec4 uBoard;
+uniform vec3 uSpec;
+uniform float uSdfRange;
+uniform float uLogoR;
+varying vec3 vWPos;
+#ifdef USE_PLANAR_REFLECTION
+uniform sampler2D uReflTex;
+uniform vec3 uReflParams;
+varying vec4 vReflCoord;
+#endif
+
+float courtHash( float n ) {
+  return fract( sin( n * 12.9898 ) * 43758.5453123 );
+}
+
+// Signed-distance coverage. Line work is barely 2.6 texels wide in the bake,
+// so thresholding a distance field is the only way it stays a 1-pixel edge
+// under magnification. The bleed term is the paint wicking into the grain.
+float courtEdge( float s, float range, float bleed ) {
+  float d = ( s - 0.5 ) * range;
+  float w = min( fwidth( d ), 2.5 ) * 0.6 + bleed;
+  return smoothstep( -w, w, d );
+}`,
+      )
+      .replace(
+        '#include <map_fragment>',
+        /* glsl */ `#include <map_fragment>
+
+vec4 courtMask = texture2D( uMask, vMapUv );
+vec4 courtDetail = texture2D( normalMap, vNormalMapUv );
+
+// Per-board tone scatter, computed analytically off world Z so it is crisp at
+// any texel density and phase-locked to the tile's seams. Faded out once a
+// pixel spans more than a board, which is the only honest way to antialias it.
+float boardCoord = vWPos.z / uBoard.x;
+float boardFoot = fwidth( boardCoord );
+float boardId = floor( boardCoord );
+float boardTone = ( courtHash( boardId * 1.13 ) - 0.5 ) * 2.0;
+boardTone *= ( courtHash( boardId * 2.71 + 5.3 ) > 0.92 ) ? 2.6 : 1.0;
+boardTone *= uWood.x * smoothstep( 1.7, 0.3, boardFoot );
+
+float courtGrain = ( courtDetail.a - 0.5 ) * uWood.y;
+diffuseColor.rgb *= 1.0 + boardTone + courtGrain;
+diffuseColor.rgb *= courtMask.a;
+
+float keyPaint = courtEdge( courtMask.r, uSdfRange, uPaint.x ) * uPaint.w;
+float linePaint = courtEdge( courtMask.g, uSdfRange, uPaint.x );
+// Paint is pigment on sanded wood, then varnish. The grain and the scuffs
+// under it still modulate what comes back.
+float telegraph = 1.0 + ( boardTone + courtGrain ) * uPaint.y;
+diffuseColor.rgb = mix( diffuseColor.rgb, uKeyColor * telegraph, keyPaint );
+diffuseColor.rgb = mix( diffuseColor.rgb, uLineColor * telegraph, linePaint );
+
+float logoPaint = 1.0 - smoothstep( uLogoR * 0.985, uLogoR * 1.015, length( vWPos.xz ) );
+float courtPaint = max( max( keyPaint, linePaint ), logoPaint * 0.85 );`,
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        /* glsl */ `#include <roughnessmap_fragment>
+roughnessFactor = uWood.z + courtMask.b * uWood.w;
+// Late wood sits fractionally rougher, so the grain modulates the highlight
+// and not only the base colour.
+roughnessFactor += ( 0.5 - courtDetail.a ) * uBoard.y;
+// Paint fills the grain: marginally smoother under the same coat.
+roughnessFactor *= mix( 1.0, 0.9, courtPaint );
+roughnessFactor = clamp( roughnessFactor, 0.03, 0.7 );`,
+      )
+      .replace(
+        '#include <normal_fragment_maps>',
+        /* glsl */ `#include <normal_fragment_maps>
+normal = normalize( mix( normal, nonPerturbedNormal, courtPaint * uPaint.z ) );`,
+      )
+      .replace(
+        '#include <lights_fragment_end>',
+        /* glsl */ `#include <lights_fragment_end>
+// Polyurethane is a mirror-bright interface and the arena carries very hot
+// practicals, so a single fixture can otherwise blow a whole board to flat
+// white and take the grain with it. Roll the floor's *specular* off through a
+// soft shoulder — diffuse is untouched, so the maple keeps its tone and the
+// highlight keeps its streak shape instead of clipping into a slab.
+reflectedLight.directSpecular /= 1.0 + reflectedLight.directSpecular / uSpec.x;
+reflectedLight.indirectSpecular /= 1.0 + reflectedLight.indirectSpecular / uSpec.y;
+#ifdef USE_CLEARCOAT
+clearcoatSpecularDirect /= 1.0 + clearcoatSpecularDirect / uSpec.z;
+#endif`,
+      )
+      .replace(
+        '#include <lights_physical_fragment>',
+        /* glsl */ `#include <lights_physical_fragment>
+#ifdef USE_CLEARCOAT
+material.clearcoatRoughness = clamp(
+  material.clearcoatRoughness + courtMask.b * 0.07, 0.03, 0.45 );
+#endif`,
+      )
+      .replace(
+        '#include <opaque_fragment>',
+        /* glsl */ `
+#ifdef USE_PLANAR_REFLECTION
+{
+  vec2 ruv = vReflCoord.xy / max( vReflCoord.w, 1e-4 );
+  float valid = step( 0.0, vReflCoord.w );
+  // Fade at the edges of the reflection frustum so nothing pops at the border.
+  float edge = smoothstep( 0.0, 0.05, ruv.x ) * smoothstep( 1.0, 0.95, ruv.x ) *
+               smoothstep( 0.0, 0.04, ruv.y ) * smoothstep( 1.0, 0.96, ruv.y );
+  float viewDist = length( vViewPosition );
+  float lod = clamp( material.roughness * uReflParams.y + viewDist * 0.055,
+                     0.0, uReflParams.z );
+  // Three vertical taps: an anisotropic coat smears its reflections along the
+  // boards, which in every broadcast framing runs away from camera.
+  float sm = ( 0.0022 + 0.0016 * lod );
+  vec3 refl = textureLod( uReflTex, ruv, lod ).rgb * 0.5;
+  refl += textureLod( uReflTex, ruv + vec2( 0.0, sm ), lod + 0.7 ).rgb * 0.25;
+  refl += textureLod( uReflTex, ruv - vec2( 0.0, sm ), lod + 0.7 ).rgb * 0.25;
+  // A varnish reflection carries the *structure* of the room — dark bowl,
+  // bright ceiling — not the crowd's shirt colours, which at this blur would
+  // read as coloured bruises on the wood.
+  refl = mix( vec3( dot( refl, vec3( 0.2126, 0.7152, 0.0722 ) ) ), refl, 0.55 );
+
+  float fres = pow( 1.0 - saturate( dot( geometryNormal, geometryViewDir ) ), 5.0 );
+  float k = uReflParams.x * mix( 0.03, 1.0, fres ) * edge * valid;
+  k *= 1.0 - smoothstep( 11.0, 32.0, viewDist );
+  k *= saturate( 1.0 - material.roughness * 2.2 );
+  outgoingLight += refl * max( k, 0.0 );
+}
+#endif
+#include <opaque_fragment>`,
+      );
+  }
+
+  // -------------------------------------------------------------------------
+  // Planar reflection
+  // -------------------------------------------------------------------------
+
+  private buildReflectionTarget(engine: Engine): void {
+    const h = engine.quality.reflectionResolution;
+    const aspect = engine.pixelWidth / Math.max(1, engine.pixelHeight);
+    const w = Math.max(64, Math.round(h * (aspect > 0 ? aspect : 9 / 19.5)));
+    this.reflectionRT?.dispose();
+    const rt = new WebGLRenderTarget(w, h, {
+      type: HalfFloatType,
+      depthBuffer: true,
+      stencilBuffer: false,
+      generateMipmaps: true,
+      minFilter: LinearMipmapLinearFilter,
+    });
+    rt.texture.name = 'court.reflection';
+    this.reflectionRT = rt;
+    this.uniforms.uReflTex.value = rt.texture;
+  }
+
   /**
-   * Bakes the full court into one texture: board-by-board maple, the painted
-   * keys, every regulation line, and the wear that a real floor accumulates.
-   * The bake is UV-mapped 1:1 over the apron-inclusive plane.
+   * Mirrors the active camera through the floor plane and renders the arena
+   * into the reflection target. Runs from `onBeforeRender` so it always sees
+   * the camera the frame is actually being drawn with, and guards against
+   * re-entry so the nested render cannot recurse.
    */
-  private bakeAlbedo(size: number): CanvasTexture {
-    const W = size * 2;
-    const H = size;
-    const cvs = document.createElement('canvas');
-    cvs.width = W;
-    cvs.height = H;
-    const ctx = cvs.getContext('2d')!;
-    const rng = makeRng(20260726);
+  private renderReflection(renderer: WebGLRenderer, scene: Scene, camera: Camera): void {
+    const rt = this.reflectionRT;
+    if (!rt || this.reflecting) return;
+    if (camera !== this.engine.camera) return;
+    const frame = this.engine.frame;
+    if (frame === this.lastReflectFrame) return;
+    if (frame % this.reflectEvery !== 0 && this.lastReflectFrame >= 0) return;
 
-    const totalW = COURT.length + COURT.apronX * 2;
-    const totalH = COURT.width + COURT.apronZ * 2;
-    const pxPerM = W / totalW;
-    const m2px = (m: number) => m * pxPerM;
-    /** Court space (metres, origin centre) → canvas pixels. */
-    const cx = (x: number) => W * 0.5 + m2px(x);
-    const cz = (z: number) => H * 0.5 + (z / totalH) * H;
+    const main = camera as PerspectiveCamera;
+    this._pos.setFromMatrixPosition(main.matrixWorld);
+    if (this._pos.y <= 0.05) return; // camera at or under the deck
 
-    // ---- Maple substrate -------------------------------------------------
-    ctx.fillStyle = '#b7803f';
-    ctx.fillRect(0, 0, W, H);
+    this._rot.extractRotation(main.matrixWorld);
+    this._look.set(0, 0, -1).applyMatrix4(this._rot).add(this._pos);
+    this._up.set(0, 1, 0).applyMatrix4(this._rot);
 
-    const boardWidthM = 0.0635; // 2.5 in strip flooring
-    const boardPx = m2px(boardWidthM);
-    const boards = Math.ceil(H / boardPx) + 1;
-    for (let i = 0; i < boards; i++) {
-      const y0 = i * boardPx;
-      // Each board gets its own hue: maple runs from pale straw to amber.
-      const t = rng();
-      const l = 52 + t * 13;
-      const s = 38 + rng() * 12;
-      const h = 30 + rng() * 7;
-      ctx.fillStyle = `hsl(${h} ${s}% ${l}%)`;
-      ctx.fillRect(0, y0, W, boardPx + 1);
+    const cam = this.reflectCamera;
+    cam.position.set(this._pos.x, -this._pos.y, this._pos.z);
+    cam.up.set(-this._up.x, this._up.y, -this._up.z);
+    cam.lookAt(this._look.x, -this._look.y, this._look.z);
+    cam.near = main.near;
+    cam.far = main.far;
+    cam.fov = main.fov;
+    cam.aspect = main.aspect;
+    cam.updateMatrixWorld(true);
+    cam.projectionMatrix.copy(main.projectionMatrix);
 
-      // Grain: long ridged streaks along the board.
-      const img = ctx.getImageData(0, Math.max(0, Math.floor(y0)), W, Math.ceil(boardPx) + 1);
-      const px = img.data;
-      const rows = img.height;
-      const seed = Math.floor(rng() * 9999);
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < W; x++) {
-          const n =
-            ridged2(x * 0.0125, (y0 + y) * 0.26, 4, seed) * 0.62 +
-            fbm2(x * 0.055, (y0 + y) * 0.9, 3, 2, 0.5, seed + 41) * 0.38;
-          const k = (n - 0.5) * 46;
-          const o = (y * W + x) * 4;
-          px[o] = clamp01((px[o] + k * 1.1) / 255) * 255;
-          px[o + 1] = clamp01((px[o + 1] + k * 0.86) / 255) * 255;
-          px[o + 2] = clamp01((px[o + 2] + k * 0.6) / 255) * 255;
-        }
-      }
-      ctx.putImageData(img, 0, Math.max(0, Math.floor(y0)));
-
-      // Board seam.
-      ctx.strokeStyle = 'rgba(50,28,10,0.34)';
-      ctx.lineWidth = Math.max(1, pxPerM * 0.0016);
-      ctx.beginPath();
-      ctx.moveTo(0, y0 + 0.5);
-      ctx.lineTo(W, y0 + 0.5);
-      ctx.stroke();
-
-      // Butt joints where planks end.
-      let x = rng() * m2px(2);
-      while (x < W) {
-        ctx.beginPath();
-        ctx.moveTo(x, y0);
-        ctx.lineTo(x, y0 + boardPx);
-        ctx.stroke();
-        x += m2px(1.5 + rng() * 2.6);
-      }
+    // Oblique near plane, so nothing under the deck can bleed into the mirror.
+    this._plane.copy(MIRROR_PLANE).applyMatrix4(cam.matrixWorldInverse);
+    this._clip.set(
+      this._plane.normal.x,
+      this._plane.normal.y,
+      this._plane.normal.z,
+      this._plane.constant,
+    );
+    const pm = cam.projectionMatrix.elements;
+    this._q.set(
+      (Math.sign(this._clip.x) + pm[8]) / pm[0],
+      (Math.sign(this._clip.y) + pm[9]) / pm[5],
+      -1,
+      (1 + pm[10]) / pm[14],
+    );
+    const denom = this._clip.dot(this._q);
+    if (Math.abs(denom) > 1e-6) {
+      this._clip.multiplyScalar(2 / denom);
+      pm[2] = this._clip.x;
+      pm[6] = this._clip.y;
+      pm[10] = this._clip.z + 1 - 0.004;
+      pm[14] = this._clip.w;
     }
 
-    // ---- Apron shading ---------------------------------------------------
-    // Out-of-bounds surround is stained darker on a broadcast floor.
-    ctx.save();
-    ctx.globalCompositeOperation = 'multiply';
-    ctx.fillStyle = 'rgba(96,58,26,0.62)';
-    ctx.fillRect(0, 0, W, cz(-COURT.halfWidth));
-    ctx.fillRect(0, cz(COURT.halfWidth), W, H - cz(COURT.halfWidth));
-    ctx.fillRect(0, 0, cx(-COURT.halfLength), H);
-    ctx.fillRect(cx(COURT.halfLength), 0, W - cx(COURT.halfLength), H);
-    ctx.restore();
+    this.reflecting = true;
+    this.lastReflectFrame = frame;
 
-    // ---- Painted keys ----------------------------------------------------
-    const lw = m2px(COURT.lineWidth);
-    const paint = '#1b4d8f';
-    for (const side of [1, -1] as const) {
-      const baseX = side * COURT.halfLength;
-      const ftX = side * (COURT.halfLength - COURT.key.length);
-      ctx.fillStyle = paint;
-      ctx.fillRect(
-        Math.min(cx(baseX), cx(ftX)),
-        cz(-COURT.key.width / 2),
-        Math.abs(cx(ftX) - cx(baseX)),
-        m2px(COURT.key.width),
-      );
-      // Free-throw semicircle, also painted.
-      ctx.beginPath();
-      ctx.arc(cx(ftX), cz(0), m2px(COURT.key.circleRadius), 0, Math.PI * 2);
-      ctx.fill();
-    }
+    const prevTarget = renderer.getRenderTarget();
+    const prevFace = renderer.getActiveCubeFace();
+    const prevMip = renderer.getActiveMipmapLevel();
+    const prevShadowAuto = renderer.shadowMap.autoUpdate;
+    const prevXr = renderer.xr.enabled;
 
-    // ---- Regulation lines ------------------------------------------------
-    ctx.strokeStyle = '#f6f2ea';
-    ctx.fillStyle = '#f6f2ea';
-    ctx.lineWidth = lw;
-    ctx.lineCap = 'butt';
+    renderer.xr.enabled = false;
+    renderer.shadowMap.autoUpdate = false; // the frame's maps are already current
+    this.floor.visible = false;
 
-    const rect = (x0: number, z0: number, x1: number, z1: number) => {
-      ctx.strokeRect(cx(x0), cz(z0), cx(x1) - cx(x0), cz(z1) - cz(z0));
-    };
+    renderer.setRenderTarget(rt);
+    renderer.clear();
+    renderer.render(scene, cam);
 
-    // Boundary.
-    rect(-COURT.halfLength, -COURT.halfWidth, COURT.halfLength, COURT.halfWidth);
-    // Half-court line.
-    ctx.beginPath();
-    ctx.moveTo(cx(0), cz(-COURT.halfWidth));
-    ctx.lineTo(cx(0), cz(COURT.halfWidth));
-    ctx.stroke();
-    // Centre circles.
-    for (const r of [COURT.centreCircleRadius, 2 * 0.3048]) {
-      ctx.beginPath();
-      ctx.arc(cx(0), cz(0), m2px(r), 0, Math.PI * 2);
-      ctx.stroke();
-    }
+    this.floor.visible = true;
+    renderer.setRenderTarget(prevTarget, prevFace, prevMip);
+    renderer.shadowMap.autoUpdate = prevShadowAuto;
+    renderer.xr.enabled = prevXr;
+    this.reflecting = false;
 
-    for (const side of [1, -1] as const) {
-      const baseX = side * COURT.halfLength;
-      const ftX = side * (COURT.halfLength - COURT.key.length);
-      const basket = side * (COURT.halfLength - COURT.basketFromBaseline);
-
-      // Lane boundary.
-      rect(baseX, -COURT.key.width / 2, ftX, COURT.key.width / 2);
-
-      // Free-throw circle: solid toward the basket, dashed away from it.
-      ctx.beginPath();
-      ctx.arc(cx(ftX), cz(0), m2px(COURT.key.circleRadius), 0, Math.PI * 2);
-      ctx.stroke();
-
-      // Restricted-area arc under the rim.
-      ctx.beginPath();
-      const a0 = side === 1 ? Math.PI * 0.5 : -Math.PI * 0.5;
-      ctx.arc(cx(basket), cz(0), m2px(COURT.restrictedRadius), a0, a0 + Math.PI, side !== 1);
-      ctx.stroke();
-
-      // Three-point line: corner straights + arc.
-      const cornerZ = COURT.halfWidth - COURT.threePoint.cornerInsetFromSideline;
-      const R = COURT.threePoint.radius;
-      // X where the arc meets the corner straight.
-      const dx = Math.sqrt(Math.max(0, R * R - cornerZ * cornerZ));
-      const joinX = basket - side * dx;
-
-      for (const z of [cornerZ, -cornerZ]) {
-        ctx.beginPath();
-        ctx.moveTo(cx(baseX), cz(z));
-        ctx.lineTo(cx(joinX), cz(z));
-        ctx.stroke();
-      }
-      ctx.beginPath();
-      const startA = Math.atan2(cornerZ, joinX - basket);
-      const endA = Math.atan2(-cornerZ, joinX - basket);
-      ctx.arc(cx(basket), cz(0), m2px(R), startA, endA, side === 1);
-      ctx.stroke();
-
-      // Lane blocks / hash marks along the key.
-      const blocks = [0.9144, 0.9144 + 0.9144, 0.9144 + 0.9144 + 0.8636];
-      for (const d of blocks) {
-        for (const sgn of [1, -1] as const) {
-          const bx = baseX - side * d;
-          ctx.fillRect(
-            cx(bx) - lw * 0.5,
-            cz(sgn * (COURT.key.width / 2)) - (sgn > 0 ? 0 : m2px(0.2)),
-            lw,
-            m2px(0.2),
-          );
-        }
-      }
-    }
-
-    // ---- Centre logo -----------------------------------------------------
-    ctx.save();
-    ctx.translate(cx(0), cz(0));
-    ctx.globalAlpha = 0.92;
-    const R = m2px(2.1);
-    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, R);
-    grad.addColorStop(0, 'rgba(226,110,32,0.95)');
-    grad.addColorStop(0.72, 'rgba(160,62,18,0.9)');
-    grad.addColorStop(1, 'rgba(90,34,10,0.85)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(0, 0, R, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = '#f7f3ec';
-    ctx.font = `900 ${Math.round(R * 0.52)}px ui-sans-serif, system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('BALLIN', 0, 0);
-    ctx.restore();
-
-    // ---- Wear, scuffs and polish streaks ---------------------------------
-    ctx.save();
-    ctx.globalCompositeOperation = 'multiply';
-    for (let i = 0; i < 900; i++) {
-      const x = rng() * W;
-      const y = rng() * H;
-      // Traffic concentrates in the paint and along the arc.
-      const mx = (x / W - 0.5) * COURT.length;
-      const mz = (y / H - 0.5) * COURT.width;
-      const nearKey = Math.min(
-        Math.abs(Math.abs(mx) - (COURT.halfLength - COURT.key.length * 0.5)),
-        6,
-      );
-      const w = clamp01(1 - nearKey / 6) * 0.7 + 0.3;
-      if (rng() > w) continue;
-      const len = 6 + rng() * 34;
-      const a = rng() * Math.PI;
-      ctx.strokeStyle = `rgba(70,48,26,${0.02 + rng() * 0.05})`;
-      ctx.lineWidth = 1 + rng() * 2.4;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len * 0.4);
-      ctx.stroke();
-      void mz;
-    }
-    ctx.restore();
-
-    const tex = new CanvasTexture(cvs);
-    tex.colorSpace = SRGBColorSpace;
-    return tex;
+    // Bias · projection · view — sampled with the floor's world position.
+    const m = this.uniforms.uReflMx.value;
+    m.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
+    m.multiply(cam.projectionMatrix);
+    m.multiply(cam.matrixWorldInverse);
   }
 
-  /** Varnish gloss variation — buffed lanes read glossier than the corners. */
-  private bakeRoughness(size: number): CanvasTexture {
-    const W = size * 2;
-    const H = size;
-    const cvs = document.createElement('canvas');
-    cvs.width = W;
-    cvs.height = H;
-    const ctx = cvs.getContext('2d')!;
-    const img = ctx.createImageData(W, H);
-    const px = img.data;
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const u = x / W;
-        const v = y / H;
-        const buff = fbm2(u * 9, v * 5, 4, 2, 0.55, 3);
-        const micro = fbm2(u * 180, v * 90, 2, 2, 0.5, 88);
-        // 0.16 (mirror-buffed) → 0.42 (dull corner)
-        const r = 0.17 + buff * 0.17 + micro * 0.07;
-        const o = (y * W + x) * 4;
-        const c = Math.round(clamp01(r) * 255);
-        px[o] = px[o + 1] = px[o + 2] = c;
-        px[o + 3] = 255;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-    return new CanvasTexture(cvs);
+  resize(_width: number, _height: number, engine: Engine): void {
+    if (this.reflectionRT) this.buildReflectionTarget(engine);
   }
 
-  /** World-space query used by physics and AI for the floor plane. */
+  // -------------------------------------------------------------------------
+
+  /**
+   * World-space floor height. The court is a true plane: every bit of milled
+   * relief is under half a millimetre and lives in the normal map, so physics
+   * and AI get a flat, deterministic surface rather than a lie about
+   * displacement that is not in the geometry.
+   */
   heightAt(_p: Vector3): number {
-    return 0;
+    return this.surfaceY;
+  }
+
+  /** True when a world position is inside the 94 × 50 ft playing surface. */
+  inBounds(p: Vector3): boolean {
+    return Math.abs(p.x) <= COURT.halfLength && Math.abs(p.z) <= COURT.halfWidth;
+  }
+
+  dispose(): void {
+    this.floor?.geometry.dispose();
+    this.material?.dispose();
+    for (const t of this.textures) t.dispose();
+    this.textures.length = 0;
+    this.reflectionRT?.dispose();
+    this.reflectionRT = null;
+    this.group.removeFromParent();
   }
 }
