@@ -35,8 +35,8 @@ function args() {
   return out;
 }
 
-async function serveDist(port) {
-  const base = join(ROOT, 'dist');
+async function serveDist(port, distDir) {
+  const base = join(ROOT, distDir);
   const server = createServer(async (req, res) => {
     try {
       let p = decodeURIComponent((req.url || '/').split('?')[0]);
@@ -84,9 +84,11 @@ async function main() {
   const quality = String(o.quality || 'high');
   const settle = Number(o.settle || 900);
   const names = o.scenes ? String(o.scenes).split(',') : Object.keys(SCENES);
+  // Parallel agents each build into their own outDir and serve their own port.
+  const distDir = String(o.dist || 'dist');
 
   await mkdir(dir, { recursive: true });
-  const server = await serveDist(port);
+  const server = await serveDist(port, distDir);
 
   const browser = await chromium.launch({
     args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
