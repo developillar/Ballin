@@ -74,18 +74,26 @@ export function rigBanks(): RigBank[] {
       0.94,
       [1.0, 0.972, 0.93],
     ),
+    // The two outer wash runs. Their gain is deliberately a fraction of the
+    // sideline banks': hung at z = ±22 and 19 m up, they subtend an elevation of
+    // ~41° from court centre, which is squarely inside the *upper bowl* band of
+    // the equirect. At the round-0 gain of 0.34 they were the brightest thing in
+    // that band and the seating bowl reflected — and received — more from them
+    // than from anything below it, which inverts the bowl's own gradient (§6.1
+    // asks for darker going up, and the round-0 capture measured the upper band
+    // a full stop *brighter* than the crowd under it).
     run(
       new Vector3(-wh, bankHeight + wash.rise, wash.z),
       new Vector3(wh, bankHeight + wash.rise, wash.z),
       wash.pods,
-      0.34,
+      0.13,
       [0.86, 0.92, 1.0],
     ),
     run(
       new Vector3(-wh, bankHeight + wash.rise, -wash.z),
       new Vector3(wh, bankHeight + wash.rise, -wash.z),
       wash.pods,
-      0.34,
+      0.13,
       [0.86, 0.92, 1.0],
     ),
   ];

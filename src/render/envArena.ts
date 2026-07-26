@@ -101,8 +101,17 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
         // ---- Lower hemisphere: varnished hardwood, apron, courtside.
         // Steeply down is the court itself; near the horizon we are looking
         // across the apron and the courtside furniture, which is much darker.
+        // Held well under the hardwood's own radiance on purpose. Physically an
+        // infinite lambertian floor at `floorL` would bounce `PI * floorL` back
+        // into every downward normal, and three would then add that to the
+        // `HemisphereLight` that models the same bounce — the floor counted
+        // twice. Measured on the round-0 bake, the lower hemisphere alone put
+        // 0.44 of irradiance onto every *vertical* surface in the room, which is
+        // most of what made players read as ambient-lit (§1.2, §10 tell 1). A
+        // player also occludes most of the floor they are standing on, which the
+        // infinite-plane figure does not know about.
         const k = smoothstep(clamp01((-e - 0.03) / 0.62));
-        const lum = lerp(floorL * 0.52, floorL, k);
+        const lum = lerp(floorL * 0.30, floorL * 0.55, k);
         // Board-to-board tone scatter survives PMREM as a faint break-up.
         const grain = 1 + (fbm2(u * 26, v * 52, 3, 2, 0.5, seed) - 0.5) * 0.22;
         const s = lum * grain * warmS;
@@ -123,7 +132,7 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
         // courtside — apron, chair backs, camera operators — is a good two
         // stops under the playing surface.
         const t = smoothstep(clamp01((e + 0.03) / 0.065));
-        const lum = lerp(floorL * 0.30, floorL * 0.10, t);
+        const lum = lerp(floorL * 0.14, floorL * 0.05, t);
         const s = lum * warmS;
         r = WARM[0] * s * 0.94;
         g = WARM[1] * s * 1.02;
@@ -213,11 +222,18 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
 
         // ---- Jumbotron, hung over centre court: a large soft cool rectangle
         // near the zenith with visible pixel-grid structure.
+        // Narrow and dim next to round 0. The bake is authored at court centre,
+        // so an object hung over centre court lands as a *ring* in elevation
+        // covering every azimuth. At the round-0 figures (peak 1.05, sigma
+        // 0.115 rad) that ring was carrying 0.30 of the 0.55 irradiance the
+        // whole environment put on an up-facing floor patch — a jumbotron
+        // out-lighting the catwalks. It still reads as a large soft cool
+        // rectangle in chrome and glass, which is its actual job.
         if (e > 0.98) {
-          const face = Math.exp(-Math.pow((e - 1.14) / 0.115, 2));
+          const face = Math.exp(-Math.pow((e - 1.14) / 0.08, 2));
           const grid = 0.86 + 0.14 * Math.sin(u * width * 0.09) * Math.sin(e * 620);
           const content = 0.4 + 0.6 * fbm2(u * 18, v * 30, 2, 2, 0.5, seed + 401);
-          const s2 = face * 1.05 * grid * content;
+          const s2 = face * 0.45 * grid * content;
           r += 0.80 * s2;
           g += 0.88 * s2;
           b += 1.0 * s2;
@@ -336,8 +352,13 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
 
     for (const p of bank.pods) {
       // The lens: small, hard-edged, very bright. This is the 1–3 small hard
-      // speculars at 200–255 on the backboard glass (§1.4b).
-      paintQuad(p, halfW, halfD, L, podTint, 1.25, 1, false);
+      // speculars at 200–255 on the backboard glass (§1.4b). `spread` is 1.10
+      // rather than 1.25 because the shoulder is area, and area on the brightest
+      // population in the room is irradiance: 66 lenses are the single largest
+      // term in the environment's contribution to the floor, and that term is
+      // double-counting the analytic banks that stand for the same fixtures.
+      // Tighter is also more correct — a fixture lens has a hard edge.
+      paintQuad(p, halfW, halfD, L, podTint, 1.1, 1, false);
       // The reflector housing glow: broad, an order dimmer, still rectangular.
       // This is the population §1.4a asks for — "a blurred grid of 4–12 bright
       // quads at 60–120 occupying 20–50% of the glass" — so it wants to read as
@@ -347,26 +368,31 @@ export function bakeArenaEnvironment(opts: ArenaEnvOptions = {}): DataTexture {
       // sideline run is 2.59 m, so a 3.2× halo (3.4 m wide) welded the whole
       // 44 m catwalk into one continuous bright band, and a continuous band is
       // what a floor reflects as a flat white sheet instead of a row of
-      // streaks. 1.9× keeps it at 2.0 m — separate quads with dark ceiling
+      // streaks. 1.55× keeps it at 1.6 m — separate quads with dark ceiling
       // between them, which is what makes the reflection read as structure.
-      paintQuad(p, halfW * 1.9, halfD * 2.4, L * 0.028, podTint, 1.9, 1, false);
-      // The catwalk run bridged into a continuous strip. This is what turns the
-      // reflection in glass and chrome into recognisable *bars* rather than a
-      // scatter of dots, and it is the single strongest environment cue.
       //
-      // Halved in radiance and doubled in cross-section from round 1. At the old
-      // figures the strip subtended 0.028 rad and carried 0.145 scene-linear,
-      // which in a roughness-0.06 backboard came back as a razor-thin white line
-      // ruled diagonally across the whole pane — an artefact, not a reflection.
-      // Real glass shows a soft bar. Same total energy, half the peak, twice the
-      // width, and it also stops painting a hot band into the grazing reflection
-      // in the hardwood.
+      // 3.2× the round-0 radiance over 0.65× the area: §1.4a's grid wants
+      // "4–12 bright quads at luminance 60–120", and at 0.028 this population
+      // was arriving in the glass an order of magnitude under that while its
+      // area made it the expensive half of the pod's irradiance. Brighter and
+      // tighter buys the reading and costs less light.
+      paintQuad(p, halfW * 1.55, halfD * 1.9, L * 0.09, podTint, 1.7, 1, false);
+      // The catwalk run bridged into a strip. Cut hard from round 0 (0.022 →
+      // 0.006): this is a *continuous* emitter 44 m long, and at round-0
+      // strength it was the only thing legible in the backboard — the reviewer's
+      // "exactly one broad diagonal streak" where §1.4a asks for a grid of
+      // discrete quads. It stays in at a whisper because it is what keeps the
+      // pods reading as one run rather than a random scatter, but the population
+      // that must dominate the glass is the per-pod halo above.
       const bw = alongX ? step * 0.55 : halfD * 2.2;
       const bd = alongX ? halfD * 2.2 : step * 0.55;
-      paintQuad(p, bw, bd, L * 0.022, podTint, 1.7, 1, false);
+      paintQuad(p, bw, bd, L * 0.006, podTint, 1.7, 1, false);
       // And the same pod smeared back off the varnish, stretched vertically, so
       // chrome carries a bright warm floor band with streak structure in it.
-      paintQuad(p, halfW * 2.0, halfD * 2.0, L * 0.04, WARM, 2.6, 4.5, true);
+      // A third of round 0: this pass paints *below* the horizon, which is
+      // exactly where the near hardwood's grazing reflection and every vertical
+      // surface's fill come from (§1.2 key:fill, and the bleached near floor).
+      paintQuad(p, halfW * 2.0, halfD * 2.0, L * 0.013, WARM, 2.6, 4.5, true);
     }
   }
 

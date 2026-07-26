@@ -85,7 +85,11 @@ export function bakeNetCord(size = 64): { map: CanvasTexture; rough: CanvasTextu
       const fil = ridged2((u * PLIES + v) * 26, (u * 6 - v * 2) * 5, 2, 17);
       const fuzz = fbm2(x * 0.55, y * 0.55, 3, 2, 0.5, 91);
 
-      const lum = 206 + 46 * ply + 11 * (fil - 0.5) - 13 * (fuzz - 0.5);
+      // §5.3 puts a used net at 200–235 sRGB on the top rings once it is lit,
+      // and the cord is lit by nothing but the overhead banks three stops above
+      // a dark bowl, so the albedo has to start high. The vertex-colour soil
+      // ramp in Hoop.ts takes it down from here, not up.
+      const lum = 221 + 39 * ply + 11 * (fil - 0.5) - 13 * (fuzz - 0.5);
       const o = (y * W + x) * 4;
       ai.data[o] = clamp01(lum / 255) * 255;
       ai.data[o + 1] = clamp01((lum * 0.994) / 255) * 255;
@@ -156,47 +160,76 @@ export function bakeRimMaps(
       // --- powder coat base ------------------------------------------------
       // Orange peel: powder coat is sprayed, so it has a fine dimpled texture.
       //
-      // Base hue 17.5°, saturation 83%, value 84% — §5.2's 14–24° / 70–85%
-      // window. It has to be pitched this high in albedo because the ring hangs
-      // in a bowl that is deliberately 3 stops down and ACES pulls saturated
-      // reds toward black: a "correct-looking" swatch in the texture viewer
-      // lands as dark maroon on screen, which is exactly what round 1 caught.
+      // §5.2 wants the ring measured *in the frame* at hue 16–20°, saturation
+      // 70–85%. This bake is therefore deliberately NOT at that hue: the frame
+      // is graded with a warm-highlight split that measured +23 R−B, and that
+      // plus an ACES shoulder rotates a saturated orange about 9° toward red on
+      // its way to the screen. Round 1 baked a "correct" 17.5° swatch and the
+      // ring rendered at 8.7° — rose, not NBA orange. So the bake is pitched
+      // yellow of the target (hue ≈ 28°, sat 83%) and lands inside the window
+      // once the pipeline has taken its 9° back. Re-measure on the ring in the
+      // frame, never in the texture viewer.
       const peel = fbm2(u * 220, v * 34, 3, 2.1, 0.55, 5);
       let r = 214 + (peel - 0.5) * 22;
-      let g = 88 + (peel - 0.5) * 14;
+      let g = 120 + (peel - 0.5) * 16;
       let b = 36 + (peel - 0.5) * 8;
-      // The underside stays cleaner and reads a shade deeper.
-      const underside = smoothstep(clamp01((0.42 - Math.abs(v - 0.25)) / 0.3));
-      r -= underside * 15;
-      g -= underside * 8;
-      b -= underside * 3;
+      // The *inner* face stays cleaner and reads a shade deeper. This used to
+      // darken v ≈ 0.25, which is the underside — and the underside is the one
+      // face a portrait camera below rim height actually sees, so it was
+      // dulling the only visible part of the bar. v = 0.5 is the inside of the
+      // ring, which is genuinely in its own shadow.
+      const inner = smoothstep(clamp01((0.34 - Math.abs(wrapDist(v, 0.5))) / 0.3));
+      r -= inner * 16;
+      g -= inner * 10;
+      b -= inner * 3;
 
       let rough = 0.33 + (peel - 0.5) * 0.09;
       let metal = 0.06;
 
       // --- bare metal on the strike face -----------------------------------
-      // Balls land on the top-front of the bar; that arc polishes to steel.
+      // Balls land on the front of the bar and grind the coat off it. Where
+      // that shows matters more than that it exists: v = 0 is the outer
+      // equator, 0.25 the underside, 0.5 the inside of the ring and 0.75 the
+      // top face. Every portrait framing in this game puts the camera 0.5–1.0 m
+      // *below* rim height, so the top face is never on screen — a wear band
+      // centred there (which is what round 1 had, at v = 0.78) is invisible and
+      // the ring reads pristine, which is §10 tell #21.
+      //
+      // So the band now runs across the outer/lower/front faces the camera
+      // actually sees, wrapping v ≈ 0.85 → 0.45 with its peak on the outer
+      // shoulder, and the top keeps a weaker patch so the ring is not wrong
+      // from above either.
       const du = Math.abs(wrapDist(u, frontU));
-      const topness = clamp01(1 - Math.abs(wrapDist(v, 0.78)) / 0.30);
-      const arc = clamp01(1 - du / 0.17);
+      const faceLower = clamp01(1 - Math.abs(wrapDist(v, 0.13)) / 0.33);
+      const faceTop = clamp01(1 - Math.abs(wrapDist(v, 0.78)) / 0.24) * 0.62;
+      const facing = Math.max(faceLower, faceTop);
+      const arc = clamp01(1 - du / 0.18);
       const wearNoise = fbm2(u * 96, v * 26, 4, 2.2, 0.5, 71);
-      let wear = clamp01(Math.pow(arc, 0.9) * Math.pow(topness, 1.1) * 1.5 - 0.30);
+      let wear = clamp01(Math.pow(arc, 0.9) * Math.pow(facing, 1.05) * 1.55 - 0.28);
       // Chipped paint has a ragged edge, never a soft gradient.
-      wear = clamp01((wear - 0.50 + (wearNoise - 0.5) * 0.62) * 6);
+      wear = clamp01((wear - 0.48 + (wearNoise - 0.5) * 0.62) * 6);
 
-      // Chipping along the outer equator where the net and hands scrape.
-      const equator = clamp01(1 - Math.abs(wrapDist(v, 0.0)) / 0.09);
-      const chip = clamp01((fbm2(u * 320, v * 60, 3, 2, 0.5, 23) - 0.62) * 9) * equator * 0.85;
+      // Chipping along the outer equator where the net and hands scrape. Wider
+      // than round 1 and carried the whole way round the ring, because the
+      // outer equator is the silhouette edge in every below-rim framing.
+      const equator = clamp01(1 - Math.abs(wrapDist(v, 0.0)) / 0.17);
+      const chip =
+        clamp01((fbm2(u * 320, v * 60, 3, 2, 0.5, 23) - 0.55) * 8) * equator * (0.55 + 0.45 * arc);
       wear = Math.max(wear, chip);
 
       if (wear > 0) {
+        // Ground-back steel: neutral, a little brighter than the coat it
+        // replaces (coat luma ≈ 134) so §5.2's "desaturated grey-silver with
+        // high specular" reads as a lighter patch and not a dirty one. Kept
+        // off full metalness — a mirror in a three-stops-down bowl just goes
+        // black, and the whole point of the wear is that you can see it.
         const scratch = ridged2(u * 700, v * 40, 2, 3);
-        const steel = 124 + scratch * 30;
+        const steel = 152 + scratch * 34;
         r += (steel - r) * wear;
         g += (steel * 1.005 - g) * wear;
-        b += (steel * 1.03 - b) * wear;
-        rough += (0.20 + scratch * 0.10 - rough) * wear;
-        metal += (0.94 - metal) * wear;
+        b += (steel * 1.035 - b) * wear;
+        rough += (0.19 + scratch * 0.10 - rough) * wear;
+        metal += (0.74 - metal) * wear;
       }
 
       // --- gouges ----------------------------------------------------------
@@ -306,9 +339,9 @@ export function bakeBackboardMaps(
 
   // --- unpainted glass ------------------------------------------------------
   // Dark, faintly green. See the note above: this must subtract, not add.
-  const GLASS_R = 13;
-  const GLASS_G = 31;
-  const GLASS_B = 25;
+  const GLASS_R = 10;
+  const GLASS_G = 34;
+  const GLASS_B = 27;
   pc.fillStyle = `rgb(${GLASS_R},${GLASS_G},${GLASS_B})`;
   pc.fillRect(0, 0, W, H);
   tc.fillStyle = '#000000';
@@ -356,9 +389,11 @@ export function bakeBackboardMaps(
   // Canvas y is measured down from the top of the board.
   const rimY = H - rimHeightAboveBoardBottom * px;
   const sqY = rimY - sqH + lw * 0.5;
-  // 21° hue, 72% saturation — bright enough to read as NBA orange against a
-  // three-stops-down bowl, restrained enough not to read as a vinyl sticker.
-  paintOn('#c76a38', '#565656', (c) => {
+  // Pre-compensated the same way the ring is (see bakeRimMaps): baked at hue
+  // 28° so it lands near 19° once the warm-highlight grade and the ACES
+  // shoulder have rotated it, which keeps the square and the ring reading as
+  // the same piece of hardware from the shooting angle.
+  paintOn('#e08c3e', '#565656', (c) => {
     c.lineWidth = lw;
     c.strokeRect(sqX + lw / 2, sqY + lw / 2, sqW - lw, sqH - lw);
   });
@@ -449,7 +484,18 @@ export function bakeBackboardMaps(
         const wave = Math.sin(y * 0.055 + fbm2(x * 0.006, y * 0.02, 2, 2, 0.5, 17) * 6.0);
         ri.data[o] = ri.data[o + 1] = ri.data[o + 2] =
           4 + smear * 15 + grease * 11 + (wave + 1) * 1.6;
-        let cov = 66 + rim * rim * 92 + grease * 11 + smear * 7;
+        // Coverage is the whole ball game for §5.1's transmission figure.
+        // Alpha compositing is `src·a + dst·(1−a)`, so measured transmission is
+        // exactly `1 − a` and measured contrast retention is `1 − a` as well.
+        // Round 1 sat at a = 0.26 mid-pane and 0.62 at the perimeter, i.e. a
+        // ceiling of 0.74 transmission falling to 0.38 — the crowd behind the
+        // pane came out 36% dark and three times flatter than the crowd beside
+        // it, and no amount of lighting recovers that. §5.1 asks for 0.88–0.94,
+        // so the base is a = 0.059 (cov 15/255) climbing to a ≈ 0.12 at the
+        // perimeter where the sight line crosses more glass. The board's
+        // *darkness* has to come from the bowl behind it being dark, which it
+        // is; the pane's job is only to tint and very slightly dim.
+        let cov = 15 + rim * rim * 15 + grease * 3 + smear * 2;
         let gr = GLASS_R * (1 - rim * 0.45);
         let gg = GLASS_G * (1 + rim * 0.42);
         let gb = GLASS_B * (1 - rim * 0.10);
@@ -462,9 +508,9 @@ export function bakeBackboardMaps(
           // The back face reflects the orange in front of it, at a few percent.
           const k = ghost * 0.55;
           gr += (168 - gr) * k;
-          gg += (94 - gg) * k;
-          gb += (58 - gb) * k;
-          cov += ghost * 26;
+          gg += (108 - gg) * k;
+          gb += (52 - gb) * k;
+          cov += ghost * 13;
         }
 
         ti.data[o] = ti.data[o + 1] = ti.data[o + 2] = cov;
@@ -509,77 +555,72 @@ export function bakeGlassReflection(
   c.fillStyle = '#000000';
   c.fillRect(0, 0, W, H);
 
-  // Broad, low sheen. Deliberately weak and confined to the top third: a wide
-  // even wash over the whole pane is what makes a board read as a grey slab,
-  // and round 1 caught exactly that.
-  const sheen = c.createRadialGradient(W * 0.40, H * 0.11, 0, W * 0.40, H * 0.13, W * 0.52);
-  sheen.addColorStop(0, 'rgba(112,128,146,0.15)');
-  sheen.addColorStop(0.45, 'rgba(64,78,94,0.07)');
-  sheen.addColorStop(1, 'rgba(0,0,0,0)');
-  c.fillStyle = sheen;
-  c.fillRect(0, 0, W, H);
-
-  // Population (a) of §1.4: the bank array. Rows of long linear fixtures
-  // converging with distance, blurred hard, individually dim — this population
-  // wants to sit around 60–120 on screen, never near white.
-  c.save();
-  c.globalCompositeOperation = 'lighter';
+  // --- population (a): the bank array --------------------------------------
+  // §1.4(a) is explicit: "a blurred grid of 4–12 bright quads, luminance
+  // 60–120, occupying 20–50% of the glass area." Round 1 had this population
+  // an order of magnitude too dim — 82.9% of the pane measured under 40 and
+  // only 5.5% landed in the band, so the board squinted as a black rectangle
+  // and everything bright on it came from one full-width bar.
+  //
+  // Twelve quads in four converging rows. Each is a soft-edged rectangle — a
+  // plateau out to 62% of its half-extent and then a wide blurred skirt —
+  // because that is what a 2 m linear fixture looks like in a pane with a
+  // little surface waviness. Amplitudes are chosen so the plateau itself sits
+  // in the 60–120 band: nothing in this population is allowed anywhere near
+  // white, that is what the hard speculars below are for.
+  const banks: { x: number; y: number; rx: number; ry: number; amp: number; rot: number }[] = [];
+  // Widths are set so the 60-luminance footprints do NOT merge — §1.4 asks for
+  // *discrete* quads and three touching ones read as one grey wash. The lower
+  // two rows keep to the flanks: the shooter's square lives at x 0.33–0.67,
+  // y 0.43–0.86, and a bank quad landing on it drowns the paint.
   const rows = [
-    { y: 0.108, h: 0.030, n: 5, x0: 0.10, x1: 0.91, w: 0.115, a: 0.200, blur: 26 },
-    { y: 0.222, h: 0.025, n: 4, x0: 0.15, x1: 0.84, w: 0.098, a: 0.145, blur: 34 },
-    { y: 0.352, h: 0.021, n: 4, x0: 0.13, x1: 0.86, w: 0.082, a: 0.098, blur: 40 },
-    { y: 0.505, h: 0.017, n: 3, x0: 0.20, x1: 0.78, w: 0.068, a: 0.062, blur: 46 },
+    { y: 0.118, xs: [0.190, 0.500, 0.810], rx: 0.126, ry: 0.078, amp: 112 },
+    { y: 0.312, xs: [0.225, 0.520, 0.808], rx: 0.122, ry: 0.070, amp: 102 },
+    { y: 0.545, xs: [0.175, 0.822], rx: 0.112, ry: 0.062, amp: 86 },
+    { y: 0.748, xs: [0.165, 0.832], rx: 0.104, ry: 0.055, amp: 72 },
   ];
-  for (const r of rows) {
-    for (let i = 0; i < r.n; i++) {
-      const t = r.n === 1 ? 0.5 : i / (r.n - 1);
-      // Fixtures are not evenly spaced in a real house rig.
-      const seed = Math.round(r.y * 100);
-      const jx = (hash2(i, seed, 7) - 0.5) * 0.045;
-      const jy = (hash2(i, seed, 19) - 0.5) * 0.030;
-      const js = 0.78 + hash2(i, seed, 31) * 0.5;
-      const ja = 0.7 + hash2(i, seed, 43) * 0.6;
-      const cxq = (r.x0 + (r.x1 - r.x0) * t + jx) * W;
-      const cyq = (r.y + jy) * H;
-      c.shadowColor = `rgba(186,204,224,${r.a * ja})`;
-      c.shadowBlur = r.blur;
-      c.shadowOffsetX = 0;
-      c.shadowOffsetY = 0;
-      c.fillStyle = `rgba(186,204,224,${r.a * ja * 0.7})`;
-      c.beginPath();
-      c.ellipse(cxq, cyq, (r.w * W * js) / 2, (r.h * H * js) / 2, (jy - 0.5) * 0.12, 0, Math.PI * 2);
-      c.fill();
+  for (let ri = 0; ri < rows.length; ri++) {
+    const r = rows[ri];
+    for (let i = 0; i < r.xs.length; i++) {
+      // A house rig is not a spreadsheet: jitter position, size and output so
+      // the array does not read as a stamped pattern.
+      const jx = (hash2(i, ri * 7 + 1, 7) - 0.5) * 0.030;
+      const jy = (hash2(i, ri * 7 + 1, 19) - 0.5) * 0.026;
+      const js = 0.90 + hash2(i, ri * 7 + 1, 31) * 0.22;
+      const ja = 0.86 + hash2(i, ri * 7 + 1, 43) * 0.26;
+      banks.push({
+        x: r.xs[i] + jx,
+        y: r.y + jy,
+        rx: r.rx * js,
+        ry: r.ry * (2 - js),
+        amp: r.amp * ja,
+        rot: (hash2(i, ri * 7 + 1, 57) - 0.5) * 0.16,
+      });
     }
   }
-  c.restore();
 
-  // --- the streaks ----------------------------------------------------------
-  // Population (b), and the thing that actually says "glass". A single catwalk
-  // run reflects off a 1.8 m pane as one long, *hard* bar with a hot core, not
-  // as a soft wash — and because the glass has two surfaces 38 mm apart, it
-  // reflects twice: a second, dimmer, blurrier copy sits below and behind the
-  // first. Computed per pixel rather than drawn, because a canvas gradient
-  // cannot give a sharp cross-section and a tapered length at the same time.
-  // A reflected catwalk run is a metre-wide strip of fixtures seen in a mirror,
-  // so it lands on the pane as a *broad* bar with a defined core. Drawn any
-  // narrower than this and it stops being a reflection and starts being an
-  // anamorphic lens flare, which §8.7 rules out by name.
+  // --- population (b): the catwalk runs ------------------------------------
+  // Round 1 drew this as ONE bar spanning the whole 1.8 m pane at a constant
+  // 17–21 px cross-section with a hot core — which is not a reflected catwalk,
+  // it is the anamorphic streak §8.7 bans by name. A real house has several
+  // short runs at different angles, each subtending a fraction of the board,
+  // and each soft enough to belong to the 60–120 population rather than to sit
+  // on top of it. None of these spans more than 0.27 of the board width.
   const streaks = [
-    // Primary: the near sideline catwalk.
-    { cx: 0.500, cy: 0.268, ang: -0.185, half: 0.520, w: 0.046, amp: 148, seg: 4.6, tight: 1.55 },
-    // Rear-surface second reflection: same run, one glass thickness down and
-    // blurrier, because it has been through the pane twice.
-    { cx: 0.548, cy: 0.378, ang: -0.150, half: 0.470, w: 0.086, amp: 34, seg: 3.0, tight: 0.75 },
-    // Far cross bank, catching the pane at a shallower angle.
-    { cx: 0.400, cy: 0.560, ang: 0.115, half: 0.360, w: 0.056, amp: 22, seg: 2.2, tight: 0.95 },
+    { cx: 0.300, cy: 0.212, ang: -0.30, half: 0.132, w: 0.058, amp: 78, seg: 1.5, tight: 0.70 },
+    { cx: 0.648, cy: 0.158, ang: 0.21, half: 0.116, w: 0.050, amp: 72, seg: 1.3, tight: 0.80 },
+    { cx: 0.232, cy: 0.640, ang: -0.44, half: 0.126, w: 0.072, amp: 52, seg: 1.2, tight: 0.50 },
   ];
 
-  // Three small hard speculars from the nearest fixtures. These are the only
-  // things on the board allowed to clip, and the only ones that should bloom.
+  // Three small hard speculars from the nearest fixtures. §1.4(b) wants 1–3 at
+  // 200–255, each 6–20 px across. These are the only things on the board
+  // allowed to clip, and the only ones that should bloom; the core is kept
+  // flat (low exponent) so the plateau, not just the centre pixel, renders
+  // hot, and the radii put them at 8–17 px on screen at the RIM framing.
   const hots = [
-    { x: 0.262, y: 0.148, r: 0.0128, a: 250 },
-    { x: 0.618, y: 0.196, r: 0.0094, a: 216 },
-    { x: 0.418, y: 0.108, r: 0.0068, a: 170 },
+    { x: 0.283, y: 0.152, r: 0.0090, a: 252, p: 1.35 },
+    { x: 0.658, y: 0.216, r: 0.0082, a: 246, p: 1.45 },
+    { x: 0.452, y: 0.104, r: 0.0074, a: 238, p: 1.6 },
   ];
 
   const img = c.getImageData(0, 0, W, H);
@@ -588,6 +629,19 @@ export function bakeGlassReflection(
     for (let x = 0; x < W; x++) {
       const o = (y * W + x) * 4;
       let add = 0;
+
+      for (const q of banks) {
+        const rx = x - q.x * W;
+        const ry = y - q.y * H;
+        const ca = Math.cos(q.rot);
+        const sa = Math.sin(q.rot);
+        const ax = (rx * ca + ry * sa) / (q.rx * W);
+        const ay = (-rx * sa + ry * ca) / (q.ry * H);
+        // Chebyshev distance keeps the shape a quad rather than a blob.
+        const dq = Math.max(Math.abs(ax), Math.abs(ay));
+        if (dq >= 1) continue;
+        add += (1 - smoothstep(clamp01((dq - 0.62) / 0.38))) * q.amp;
+      }
 
       for (const s of streaks) {
         const rx = x - s.cx * W;
@@ -599,8 +653,6 @@ export function bakeGlassReflection(
         if (Math.abs(along) > half) continue;
         const perp = -rx * sa + ry * ca;
         const q = perp / (s.w * H);
-        // A tight core over a wide skirt: that combination is what makes a
-        // specular read as hard rather than as a blur.
         const core = Math.exp(-q * q * s.tight * 3.2);
         const skirt = Math.exp(-q * q * 0.30) * 0.26;
         const taper = Math.pow(Math.cos((along / half) * Math.PI * 0.5), 0.85);
@@ -617,12 +669,9 @@ export function bakeGlassReflection(
         const dy = (y - h.y * H) / (h.r * W);
         const dd = Math.hypot(dx, dy);
         if (dd >= 1) continue;
-        add += Math.pow(1 - dd, 2.1) * h.a;
+        add += Math.pow(1 - dd, h.p) * h.a;
       }
 
-      // The rear surface also reflects the paint on the front face, so the
-      // border and the square carry a faint doubled ghost, displaced by twice
-      // the glass thickness. §5.1 asks for it and almost nothing has it.
       if (add <= 0) continue;
       d[o] = Math.min(255, d[o] + add * 0.96);
       d[o + 1] = Math.min(255, d[o + 1] + add * 0.985);
@@ -698,9 +747,19 @@ export function bakeVinylPad(
       const crease = ridged2(u * 7, v * 3.4, 3, 88);
       const soft = fbm2(u * 5, v * 2.5, 3, 2, 0.5, 140);
 
-      let r = base[0] + (grain - 0.5) * 12 + (soft - 0.5) * 9;
-      let g = base[1] + (grain - 0.5) * 12 + (soft - 0.5) * 9;
-      let b = base[2] + (grain - 0.5) * 13 + (soft - 0.5) * 11;
+      // §5.1 says this must not be a perfectly clean extruded box, and round 1
+      // measured it at sd 2.0 over a 200 px window — a black bar. All the
+      // amplitudes below are roughly doubled from round 1 so the vinyl still
+      // reads at a 3 m viewing distance, and the crease term now moves albedo
+      // as well as roughness (a crease in vinyl catches a highlight on one lip
+      // and shades on the other; roughness alone is invisible in a dark bowl).
+      let r = base[0] + (grain - 0.5) * 22 + (soft - 0.5) * 17;
+      let g = base[1] + (grain - 0.5) * 22 + (soft - 0.5) * 17;
+      let b = base[2] + (grain - 0.5) * 24 + (soft - 0.5) * 20;
+      const fold = (crease - 0.5) * 26;
+      r += fold;
+      g += fold;
+      b += fold * 1.1;
 
       // A brand stripe across the middle of the wrap.
       if (opts.stripe !== false) {
@@ -713,38 +772,49 @@ export function bakeVinylPad(
 
       let rough = 0.62 + (grain - 0.5) * 0.16 + crease * 0.09;
 
-      // Welded panel seams with a raised bead and stitch marks either side.
+      // Welded panel seams: a shaded valley with a lit bead on its far lip, so
+      // the seam survives the mip chain as a light/dark pair rather than
+      // averaging away to nothing the way a single dark line does.
       const seam = Math.abs((u * panels) % 1 - 0.5) * 2; // 0 at seam
-      const seamK = clamp01(1 - seam * W / (panels * 5));
+      const seamPx = seam * (W / (panels * 2));
+      const seamK = clamp01(1 - seamPx / 5);
       if (seamK > 0) {
-        r -= seamK * 9;
-        g -= seamK * 9;
-        b -= seamK * 9;
-        rough -= seamK * 0.22;
+        r -= seamK * 17;
+        g -= seamK * 17;
+        b -= seamK * 16;
+        rough -= seamK * 0.24;
       }
-      // Saddle stitching: short dashes flanking each seam.
-      const stitchDist = Math.abs(seam * (W / (panels * 2)) - 7);
-      if (stitchDist < 1.6) {
-        const dash = (y % 11) < 6 ? 1 : 0;
+      const bead = clamp01(1 - Math.abs(seamPx - 6.5) / 3.0);
+      r += bead * 15;
+      g += bead * 14;
+      b += bead * 13;
+      rough -= bead * 0.10;
+      // Saddle stitching: a run of dashes flanking each seam. The dash period
+      // is deliberately coarse — this texture is minified 2–3× on screen, and
+      // an 11 px dash simply mipped away in round 1.
+      const stitchDist = Math.abs(seamPx - 11);
+      if (stitchDist < 2.4) {
+        const dash = (y % 24) < 14 ? 1 : 0;
         if (dash) {
-          r += 26;
-          g += 24;
-          b += 22;
-          rough -= 0.14;
+          const k = 1 - stitchDist / 2.4;
+          r += 56 * k;
+          g += 53 * k;
+          b += 48 * k;
+          rough -= 0.16 * k;
         }
       }
       // Horizontal top and bottom binding tape.
-      const bind = Math.max(clamp01(1 - v / 0.045), clamp01(1 - (1 - v) / 0.045));
-      r += bind * 14;
-      g += bind * 13;
-      b += bind * 12;
-      rough -= bind * 0.12;
+      const bind = Math.max(clamp01(1 - v / 0.05), clamp01(1 - (1 - v) / 0.05));
+      r += bind * 24;
+      g += bind * 22;
+      b += bind * 20;
+      rough -= bind * 0.14;
 
       // Scuffs low down where shoes and chairs hit it.
-      const scuff = clamp01((fbm2(x * 0.06, y * 0.16, 4, 2, 0.5, 303) - 0.55) * 5) * clamp01((v - 0.55) / 0.4);
-      r += scuff * 34;
-      g += scuff * 33;
-      b += scuff * 31;
+      const scuff = clamp01((fbm2(x * 0.06, y * 0.16, 4, 2, 0.5, 303) - 0.52) * 5) * clamp01((v - 0.5) / 0.4);
+      r += scuff * 44;
+      g += scuff * 42;
+      b += scuff * 39;
       rough += scuff * 0.16;
 
       mi.data[o] = clamp01(r / 255) * 255;

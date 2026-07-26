@@ -1,85 +1,105 @@
 /**
  * Soft shadows and cascades.
  *
- * Two problems with the stock setup:
- *
- *  - `PCFSoftShadowMap` is deprecated in r185 (the renderer silently downgrades
- *    it to `PCFShadowMap` and warns), and even the current PCF path filters at a
- *    **constant** radius. Constant-softness shadows are a named tell: a planted
- *    foot needs a ≤3 px penumbra while the same player's raised hand needs
- *    12–30 px. So we take the shadow map over: `BasicShadowMap` gives us the raw
- *    depth texture as a plain `sampler2D`, and the chunk below implements PCSS —
- *    a Vogel-disc blocker search, a penumbra estimate from the blocker distance,
- *    then a Vogel-disc PCF at that radius.
- *
- *  - One 16 m shadow camera at phone resolution is ~8 mm per texel and mushy at
- *    the point of contact. `ShadowCascade` fits a tight ortho frustum around the
- *    action for the primary bank and hands the wide, static coverage to the
- *    secondary banks, which is the cheap half of a CSM without having to inject
- *    a cascade selector into every material in the project.
- *
  * ---------------------------------------------------------------------------
- * KNOWN BLOCKER, round 2 — no cast shadow reaches the floor in a capture.
+ * ROUND 1: the reason no shadow ever reached the floor, and the fix.
  *
- * The rig here is not the cause and swapping it does not help. Measured in the
- * capture harness (`tools/capture.mjs`, SwiftShader), at `high`:
+ * The round-2 header claimed three's shadow pass was issuing zero draws. That
+ * was wrong, and so was the conclusion drawn from it. The pass renders fine.
+ * What did not work was the **read**.
  *
- *  - `WebGLShadowMap.render` **is** called every frame and receives 3 shadow
- *    lights, each with a live 2048² map and `shadow.autoUpdate === true`.
- *  - three's own `shadow.getFrustum().intersectsObject()` reports **39 of 59
- *    casters inside the primary cascade** — players, ball and hoop included.
- *  - `renderer.info.render.calls` does **not move** across the shadow pass:
- *    zero draws are issued into the map.
- *  - Forcing `getShadow()` to return a constant darkens the hardwood by 9%, so
- *    the receiving end — `receiveShadow`, the uniforms, the shader plumbing —
- *    is wired correctly all the way through. What comes back from the map is
- *    "lit" because nothing was ever written into it.
- *  - Three unrelated implementations were tried and all three produce an
- *    identical, completely shadowless frame: this PCSS chunk over
- *    `BasicShadowMap`, the stock `PCFShadowMap` path with the chunk override
- *    removed and a sane `shadow.radius`, and `VSMShadowMap` (which renders to a
- *    colour target instead of a depth texture). A bug in the filtering here
- *    could not survive that; the fault is upstream of sampling.
+ * Isolated reproduction (a 256² page, one plane, one box, one directional
+ * light, no Ballin code, run in the capture harness's own browser —
+ * headless Chromium on ANGLE/SwiftShader). Darkest plane pixel over brightest,
+ * inside the box's shadow footprint:
  *
- * So this file's PCSS is kept as the correct implementation for when casters
- * start landing in the map, and the header's penumbra claims are **unverified**
- * until then. Reproduce with the diagnostics above before changing anything
- * here — the failure is not in the filter.
+ *   | shadow map type                          | darkest / brightest |
+ *   |------------------------------------------|---------------------|
+ *   | `PCFShadowMap` (sampler2DShadow)         | **0.904** — shadow  |
+ *   | `BasicShadowMap` (stock, sampler2D)      | 1.000 — no shadow   |
+ *   | `BasicShadowMap` + the PCSS chunk below  | 1.000 — no shadow   |
+ *
+ * In r185 the shadow map is a `WebGLRenderTarget` whose depth attachment is a
+ * `DepthTexture(UnsignedIntType, DepthFormat)`, and `WebGLLights` binds
+ * `shadow.map.depthTexture` — never the colour attachment. On the `BasicShadowMap`
+ * path three sets `compareFunction = null` and the chunk samples that
+ * DEPTH_COMPONENT24 texture as a plain `sampler2D`. Under this rasteriser that
+ * read does not come back as a usable depth value, so every tap looks unoccluded
+ * and `getShadow()` returns exactly 1.0 — which is precisely what the reviewer
+ * measured on the hardwood (under a planted foot 96.12 against 95.53 beside it,
+ * ratio 1.006). It also explains why `VSMShadowMap` failed identically: three's
+ * VSM pre-pass reads that same native depth texture as `sampler2D shadow_pass`.
+ * Three implementations failing the same way was not evidence of a fault
+ * upstream of sampling; it was three variants of the same unsupported read.
+ *
+ * So this file is now on the **comparison sampler**: `PCFShadowMap`, which makes
+ * three allocate the depth texture with `LessEqualCompare` and bind it as a
+ * `sampler2DShadow`. Every tap is a hardware depth compare (and, with
+ * `LinearFilter`, a free 2×2 PCF), which is both correct here and the fast path
+ * on a phone.
+ *
+ * That costs the raw depth read PCSS normally uses for its blocker search, so
+ * the search is rebuilt on top of the comparison: sampling at
+ * `receiverDepth − dz` is occluded exactly when a blocker sits more than `dz`
+ * nearer the light, so a short ladder of `dz` values brackets the
+ * receiver-to-blocker gap without ever reading a depth value. The filter radius
+ * comes from that gap, so a planted sole still filters at ~1 texel while a
+ * raised hand opens out to the cascade's ceiling — the contact hardening §1.2
+ * asks for, kept off the deprecated `PCFSoftShadowMap` path and its constant
+ * radius.
  * ---------------------------------------------------------------------------
+ *
+ * The other half of the file is cascades. One 16 m shadow camera at phone
+ * resolution is ~8 mm per texel and mushy at the point of contact.
+ * `ShadowCascade` fits a tight, texel-snapped ortho frustum around the action
+ * for the primary bank and hands wide static coverage to the secondary banks —
+ * the cheap half of a CSM without injecting a cascade selector into every
+ * material in the project.
  *
  * Owned by the lighting agent.
  */
 
 import {
-  BasicShadowMap,
   DirectionalLight,
+  PCFShadowMap,
   ShaderChunk,
   Vector3,
   type WebGLRenderer,
 } from 'three';
 
 export interface SoftShadowOptions {
-  /** Taps in the blocker search. 0 disables PCSS and falls back to fixed-radius PCF. */
-  blockerSamples: number;
+  /**
+   * Rungs in the blocker-gap ladder. 0 disables contact hardening and falls
+   * back to a fixed-radius filter at `minTexels`.
+   */
+  probeLevels: number;
+  /** Taps per rung of the ladder. */
+  probeSamples: number;
   /** Taps in the filter. */
   filterSamples: number;
   /** Hard floor on the filter radius — the contact-sharp end. */
   minTexels: number;
   /** Hard ceiling on the filter radius — keeps the far end affordable. */
   maxTexels: number;
-  /** Blocker search radius, in texels. */
+  /** Blocker search radius, in texels, at the widest rung. */
   searchTexels: number;
 }
 
+/**
+ * Tap budgets per tier. Every tap is a texture fetch on the shadow map, so the
+ * totals are what a phone actually pays: `probeLevels * probeSamples +
+ * filterSamples` per shadowed light. `low` spends 4, `medium` 16, `high` 22,
+ * `ultra` 34 — and `Quality.shadowCascades` (1 / 2 / 3 / 4) multiplies it.
+ */
 export const SOFT_SHADOW_TIERS: Record<string, SoftShadowOptions> = {
-  low: { blockerSamples: 0, filterSamples: 4, minTexels: 1.1, maxTexels: 1.1, searchTexels: 0 },
-  medium: { blockerSamples: 6, filterSamples: 10, minTexels: 0.75, maxTexels: 14, searchTexels: 7 },
-  high: { blockerSamples: 10, filterSamples: 16, minTexels: 0.7, maxTexels: 22, searchTexels: 9 },
-  ultra: { blockerSamples: 12, filterSamples: 24, minTexels: 0.65, maxTexels: 28, searchTexels: 11 },
+  low: { probeLevels: 0, probeSamples: 0, filterSamples: 4, minTexels: 1.1, maxTexels: 1.1, searchTexels: 0 },
+  medium: { probeLevels: 2, probeSamples: 4, filterSamples: 8, minTexels: 0.75, maxTexels: 14, searchTexels: 7 },
+  high: { probeLevels: 2, probeSamples: 5, filterSamples: 12, minTexels: 0.7, maxTexels: 22, searchTexels: 9 },
+  ultra: { probeLevels: 3, probeSamples: 6, filterSamples: 16, minTexels: 0.65, maxTexels: 28, searchTexels: 11 },
 };
 
 function chunkSource(o: SoftShadowOptions): string {
-  const pcss = o.blockerSamples > 0;
+  const pcss = o.probeLevels > 0 && o.probeSamples > 0;
   return /* glsl */ `
 #if NUM_SPOT_LIGHT_COORDS > 0
 	varying vec4 vSpotLightCoord[ NUM_SPOT_LIGHT_COORDS ];
@@ -92,7 +112,7 @@ function chunkSource(o: SoftShadowOptions): string {
 #ifdef USE_SHADOWMAP
 
 	#if NUM_DIR_LIGHT_SHADOWS > 0
-		uniform sampler2D directionalShadowMap[ NUM_DIR_LIGHT_SHADOWS ];
+		uniform sampler2DShadow directionalShadowMap[ NUM_DIR_LIGHT_SHADOWS ];
 		varying vec4 vDirectionalShadowCoord[ NUM_DIR_LIGHT_SHADOWS ];
 		struct DirectionalLightShadow {
 			float shadowIntensity;
@@ -105,7 +125,7 @@ function chunkSource(o: SoftShadowOptions): string {
 	#endif
 
 	#if NUM_SPOT_LIGHT_SHADOWS > 0
-		uniform sampler2D spotShadowMap[ NUM_SPOT_LIGHT_SHADOWS ];
+		uniform sampler2DShadow spotShadowMap[ NUM_SPOT_LIGHT_SHADOWS ];
 		struct SpotLightShadow {
 			float shadowIntensity;
 			float shadowBias;
@@ -117,7 +137,7 @@ function chunkSource(o: SoftShadowOptions): string {
 	#endif
 
 	#if NUM_POINT_LIGHT_SHADOWS > 0
-		uniform samplerCube pointShadowMap[ NUM_POINT_LIGHT_SHADOWS ];
+		uniform samplerCubeShadow pointShadowMap[ NUM_POINT_LIGHT_SHADOWS ];
 		varying vec4 vPointShadowCoord[ NUM_POINT_LIGHT_SHADOWS ];
 		struct PointLightShadow {
 			float shadowIntensity;
@@ -143,17 +163,17 @@ function chunkSource(o: SoftShadowOptions): string {
 		return vec2( cos( theta ), sin( theta ) ) * r;
 	}
 
-	float ballinDepth( sampler2D shadowMap, vec2 uv ) {
-		return texture2D( shadowMap, uv ).r;
-	}
-
 	/**
-	 * PCSS. \`shadowRadius\` is repurposed by \`ShadowCascade\` to carry
-	 * "penumbra texels per unit of normalised depth gap", which folds the
-	 * bank's angular size, the map resolution and the frustum extent into one
-	 * number the shader can multiply straight through.
+	 * PCSS over a comparison sampler.
+	 *
+	 * \`shadowRadius\` is repurposed by \`ShadowCascade\` to carry "penumbra
+	 * texels per unit of normalised depth gap", which folds the bank's angular
+	 * size, the map resolution and the frustum extent into one number. That also
+	 * makes \`maxTexels / shadowRadius\` the exact gap at which the penumbra
+	 * saturates, so the blocker ladder self-scales to each cascade and never
+	 * probes further than it can use.
 	 */
-	float getShadow( sampler2D shadowMap, vec2 shadowMapSize, float shadowIntensity, float shadowBias, float shadowRadius, vec4 shadowCoord ) {
+	float getShadow( sampler2DShadow shadowMap, vec2 shadowMapSize, float shadowIntensity, float shadowBias, float shadowRadius, vec4 shadowCoord ) {
 
 		shadowCoord.xyz /= shadowCoord.w;
 
@@ -171,22 +191,30 @@ function chunkSource(o: SoftShadowOptions): string {
 		float filterTexels = ${o.minTexels.toFixed(3)};
 
 		${pcss ? /* glsl */ `
-		// ---- blocker search
-		float blockerSum = 0.0;
-		float blockerCount = 0.0;
-		for ( int i = 0; i < ${o.blockerSamples}; i ++ ) {
-			vec2 off = ballinVogel( i, ${o.blockerSamples}.0, phi ) * ${o.searchTexels.toFixed(2)} * texel;
-			float d = ballinDepth( shadowMap, shadowCoord.xy + off );
-			#ifdef USE_REVERSED_DEPTH_BUFFER
-				if ( d > shadowCoord.z ) { blockerSum += d; blockerCount += 1.0; }
-			#else
-				if ( d < shadowCoord.z ) { blockerSum += d; blockerCount += 1.0; }
-			#endif
+		// ---- blocker gap, bracketed by comparison rather than read
+		// A tap at ( receiver - dz ) reports "occluded" exactly when a blocker
+		// sits more than dz nearer the light, so walking dz outward brackets the
+		// receiver-to-blocker gap without ever needing a raw depth value.
+		float gapMax = ${o.maxTexels.toFixed(2)} / max( shadowRadius, 1e-4 );
+		float gap = 0.0;
+		for ( int k = 1; k <= ${o.probeLevels}; k ++ ) {
+			float rung = float( k ) / ${o.probeLevels}.0;
+			float dz = gapMax * rung;
+			float occ = 0.0;
+			for ( int i = 0; i < ${o.probeSamples}; i ++ ) {
+				vec2 off = ballinVogel( i, ${o.probeSamples}.0, phi ) * ${o.searchTexels.toFixed(2)} * ( 0.35 + 0.65 * rung ) * texel;
+				#ifdef USE_REVERSED_DEPTH_BUFFER
+					occ += 1.0 - texture( shadowMap, vec3( shadowCoord.xy + off, shadowCoord.z + dz ) );
+				#else
+					occ += 1.0 - texture( shadowMap, vec3( shadowCoord.xy + off, shadowCoord.z - dz ) );
+				#endif
+			}
+			occ /= ${o.probeSamples}.0;
+			// smoothstep, not a raw fraction: a rung that is mostly occluded means
+			// the blocker is at least that far away, and scaling by the fraction
+			// would systematically under-read the gap at every rung.
+			gap = max( gap, dz * smoothstep( 0.08, 0.62, occ ) );
 		}
-		if ( blockerCount < 0.5 ) return 1.0;
-
-		// ---- penumbra estimate from the receiver-to-blocker gap
-		float gap = abs( shadowCoord.z - blockerSum / blockerCount );
 		filterTexels = clamp( shadowRadius * gap, ${o.minTexels.toFixed(3)}, ${o.maxTexels.toFixed(2)} );
 		` : ''}
 
@@ -194,12 +222,7 @@ function chunkSource(o: SoftShadowOptions): string {
 		float shadow = 0.0;
 		for ( int i = 0; i < ${o.filterSamples}; i ++ ) {
 			vec2 off = ballinVogel( i, ${o.filterSamples}.0, phi + 1.7 ) * filterTexels * texel;
-			float d = ballinDepth( shadowMap, shadowCoord.xy + off );
-			#ifdef USE_REVERSED_DEPTH_BUFFER
-				shadow += step( d, shadowCoord.z );
-			#else
-				shadow += step( shadowCoord.z, d );
-			#endif
+			shadow += texture( shadowMap, vec3( shadowCoord.xy + off, shadowCoord.z ) );
 		}
 		shadow /= ${o.filterSamples}.0;
 
@@ -216,25 +239,37 @@ function chunkSource(o: SoftShadowOptions): string {
 	}
 
 	#if NUM_POINT_LIGHT_SHADOWS > 0
-	float getPointShadow( samplerCube shadowMap, vec2 shadowMapSize, float shadowIntensity, float shadowBias, float shadowRadius, vec4 shadowCoord, float shadowCameraNear, float shadowCameraFar ) {
+	float getPointShadow( samplerCubeShadow shadowMap, vec2 shadowMapSize, float shadowIntensity, float shadowBias, float shadowRadius, vec4 shadowCoord, float shadowCameraNear, float shadowCameraFar ) {
 
 		vec3 lightToPosition = shadowCoord.xyz;
+		vec3 bd3D = normalize( lightToPosition );
 		vec3 absVec = abs( lightToPosition );
 		float viewSpaceZ = max( max( absVec.x, absVec.y ), absVec.z );
 		float shadow = 1.0;
 
 		if ( viewSpaceZ - shadowCameraFar <= 0.0 && viewSpaceZ - shadowCameraNear >= 0.0 ) {
 
-			float dp = ( shadowCameraFar * ( viewSpaceZ - shadowCameraNear ) ) / ( viewSpaceZ * ( shadowCameraFar - shadowCameraNear ) );
-			dp += shadowBias;
-
-			float depth = textureCube( shadowMap, normalize( lightToPosition ) ).r;
-
 			#ifdef USE_REVERSED_DEPTH_BUFFER
-				depth = 1.0 - depth;
+				float dp = ( shadowCameraNear * ( shadowCameraFar - viewSpaceZ ) ) / ( viewSpaceZ * ( shadowCameraFar - shadowCameraNear ) );
+				dp -= shadowBias;
+			#else
+				float dp = ( shadowCameraFar * ( viewSpaceZ - shadowCameraNear ) ) / ( viewSpaceZ * ( shadowCameraFar - shadowCameraNear ) );
+				dp += shadowBias;
 			#endif
 
-			shadow = step( dp, depth );
+			float texelSize = shadowRadius / shadowMapSize.x;
+			vec3 absDir = abs( bd3D );
+			vec3 tangent = absDir.x > absDir.z ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
+			tangent = normalize( cross( bd3D, tangent ) );
+			vec3 bitangent = cross( bd3D, tangent );
+			float phi = ballinIGN( gl_FragCoord.xy ) * PI2;
+
+			shadow = 0.0;
+			for ( int i = 0; i < 5; i ++ ) {
+				vec2 s = ballinVogel( i, 5.0, phi );
+				shadow += texture( shadowMap, vec4( bd3D + ( tangent * s.x + bitangent * s.y ) * texelSize, dp ) );
+			}
+			shadow *= 0.2;
 
 		}
 
@@ -251,14 +286,19 @@ let installed = false;
 
 /**
  * Swaps three's shadow chunk for the PCSS version and puts the renderer on the
- * raw-depth shadow path it needs. Must run before anything compiles a material,
+ * comparison-sampler shadow path. Must run before anything compiles a material,
  * which is why `LightingSystem` has the lowest `order` in the engine.
  */
 export function installSoftShadows(renderer: WebGLRenderer, opts: SoftShadowOptions): void {
   renderer.shadowMap.enabled = true;
-  // BasicShadowMap keeps `compareFunction` off, so the depth texture binds as a
-  // plain sampler2D and the blocker search can actually read depth values.
-  renderer.shadowMap.type = BasicShadowMap;
+  // PCFShadowMap — NOT Basic, and NOT the deprecated PCFSoftShadowMap. This is
+  // the only three path that allocates the shadow depth texture with a compare
+  // function and binds it as a `sampler2DShadow`; the Basic path's plain
+  // `sampler2D` read of a DEPTH_COMPONENT24 texture returns no usable depth on
+  // this rasteriser and silently made every shadow term exactly 1.0. See the
+  // file header for the isolated reproduction. The chunk above replaces three's
+  // 5-tap fixed-radius filter, so nothing but the sampler type is stock.
+  renderer.shadowMap.type = PCFShadowMap;
   renderer.shadowMap.autoUpdate = true;
   if (installed) return;
   ShaderChunk.shadowmap_pars_fragment = chunkSource(opts);
@@ -336,7 +376,9 @@ export class ShadowCascade {
     this.texelWorld = (s.extent * 2) / mapSize;
 
     // Depth bias scaled to the frustum, so the tight cascade keeps its contact
-    // shadows glued to the sole while the wide one still avoids acne.
+    // shadows glued to the sole while the wide one still avoids acne. With a
+    // comparison sampler the hardware also does a 2×2 tap per fetch, so the
+    // bias has to cover half a texel of slope on top of the depth quantisation.
     const depthRange = shadow.camera.far - shadow.camera.near;
     shadow.bias = -(0.9 * this.texelWorld) / depthRange;
     // Normal bias in world units — one and a half texels, which pushes the

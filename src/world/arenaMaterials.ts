@@ -66,11 +66,21 @@ function toTexture(c: HTMLCanvasElement, repeatX = 1): CanvasTexture {
 export function bakeRibbonStrip(width = 2048, height = 64): CanvasTexture {
   const { c, g } = canvas(width, height);
   const rng = makeRng(9021);
-  g.fillStyle = '#04060c';
+  // §6.2: the boards are the brightest *continuous* elements in the frame. A
+  // board is a panel of emitters that are all on — the content modulates their
+  // colour, it does not switch them off. The round-1 bake filled with #04060c
+  // and drew four of its seven palette entries in near-black navy, so the
+  // centreline alternated lit panels with ~60 px runs at 11–20 sRGB and the
+  // whole band read as bunting strung round the bowl. Nothing on this strip is
+  // allowed below the lit floor now, including the gaps between panels.
+  const FLOOR = '#1a2438';
+  g.fillStyle = FLOOR;
   g.fillRect(0, 0, width, height);
 
   const words = ['BALLIN', 'COURTSIDE', 'HOME OF THE', 'TIP-OFF', 'SEASON PASS', 'DOWNTOWN'];
-  const palette = ['#2d5cc8', '#c8452b', '#e8a32c', '#12203f', '#1c8f6a', '#0d1424', '#7a2318'];
+  // Mid-value team colours only. Anything darker than the floor above is a dead
+  // panel, and a dead panel on a board that wraps the whole bowl is a gap.
+  const palette = ['#2d5cc8', '#c8452b', '#e8a32c', '#3b6fd4', '#1c8f6a', '#8f4bbd', '#a8552a'];
 
   let x = 0;
   let w = 0;
@@ -91,7 +101,7 @@ export function bakeRibbonStrip(width = 2048, height = 64): CanvasTexture {
       // Chevron wipe.
       w = height * (5 + rng() * 5);
       const a = palette[Math.floor(rng() * palette.length)];
-      g.fillStyle = '#0a1226';
+      g.fillStyle = '#243254';
       g.fillRect(x, 0, w, height);
       g.fillStyle = a;
       for (let k = 0; k < 10; k++) {
@@ -108,7 +118,7 @@ export function bakeRibbonStrip(width = 2048, height = 64): CanvasTexture {
     } else if (kind < 0.78) {
       // Stat / score panel.
       w = height * (5.5 + rng() * 3);
-      g.fillStyle = '#080c18';
+      g.fillStyle = '#1f2c4a';
       g.fillRect(x, 0, w, height);
       g.fillStyle = '#e8a32c';
       g.font = `700 ${Math.round(height * 0.5)}px system-ui, sans-serif`;
@@ -129,8 +139,23 @@ export function bakeRibbonStrip(width = 2048, height = 64): CanvasTexture {
       }
       g.globalAlpha = 1;
     }
+    // Panel divider. A *lit* seam, not the 2 px black gutter the round-1 bake
+    // left between every panel — on a 220 m board that gutter is what put the
+    // dead runs into the centreline profile.
+    g.fillStyle = '#4a5c84';
+    g.fillRect(x + w, 0, 2, height);
     x += w + 2;
   }
+
+  // Scan structure: LED modules stack in rows and the seams between them read
+  // as faint horizontal lines at close range (§6.2). Additive-light, never a
+  // dark band, so it cannot reintroduce a dead value.
+  g.globalCompositeOperation = 'lighter';
+  for (let y = 0; y < height; y += 8) {
+    g.fillStyle = 'rgba(90,110,150,0.20)';
+    g.fillRect(0, y, width, 1);
+  }
+  g.globalCompositeOperation = 'source-over';
 
   return toTexture(c);
 }
@@ -139,10 +164,11 @@ export function bakeRibbonStrip(width = 2048, height = 64): CanvasTexture {
 export function bakeCourtsideStrip(width = 2048, height = 128): CanvasTexture {
   const { c, g } = canvas(width, height);
   const rng = makeRng(551);
-  g.fillStyle = '#03050a';
+  // Same rule as the ribbon: no dead value anywhere on a lit board.
+  g.fillStyle = '#16233d';
   g.fillRect(0, 0, width, height);
   const words = ['BALLIN', 'PLAYOFFS', 'GAME NIGHT', 'THE HOUSE', 'RISE UP'];
-  const palette = ['#2d5cc8', '#c8452b', '#e8a32c', '#0f1b3a', '#f2f5ff'];
+  const palette = ['#2d5cc8', '#c8452b', '#e8a32c', '#26437e', '#f2f5ff'];
   let x = 0;
   while (x < width) {
     const bg = palette[Math.floor(rng() * palette.length)];
@@ -152,11 +178,13 @@ export function bakeCourtsideStrip(width = 2048, height = 128): CanvasTexture {
     g.fillStyle = bg;
     g.fillRect(x, 0, w, height);
     // A slab of contrast so the board is never one flat colour.
-    g.fillStyle = 'rgba(0,0,0,0.45)';
+    g.fillStyle = 'rgba(6,12,26,0.42)';
     g.fillRect(x, height * 0.74, w, height * 0.26);
     g.fillStyle = bg === '#f2f5ff' ? '#08101f' : '#f4f8ff';
     g.textBaseline = 'middle';
     g.fillText(word, x + height * 0.6, height * 0.42);
+    g.fillStyle = '#51648e';
+    g.fillRect(x + w, 0, 4, height);
     x += w + 4;
   }
   return toTexture(c);
@@ -289,7 +317,9 @@ export function makeLedMaterial(o: LedOptions): ShaderMaterial {
       uRepeat: { value: o.repeat ?? new Vector2(1, 1) },
       uFlicker: { value: 0 },
     },
-    side: o.side,
+    // Passing `side: undefined` explicitly makes three log a parameter warning
+    // once per board, which is nine lines of noise in every capture log.
+    ...(o.side === undefined ? {} : { side: o.side }),
     vertexShader: /* glsl */ `
       varying vec2 vUv;
       varying vec3 vWorld;
@@ -327,10 +357,14 @@ export function makeLedMaterial(o: LedOptions): ShaderMaterial {
 
         // Emitters are Lambertian-ish but the mask cuts them off at grazing
         // angles, so a board seen edge-on dims instead of staying full blast.
+        // The floor of that falloff is not free: a ribbon that wraps the bowl
+        // is seen at a shallow angle from *every* court framing, so a 0.34 floor
+        // was charging the boards a full stop in the only views that matter and
+        // put them 1.33 stops under the hardwood, against §6.2's 190–250.
         vec3 V = normalize( cameraPosition - vWorld );
         vec3 N = normalize( cross( dFdx( vWorld ), dFdy( vWorld ) ) );
         float graze = abs( dot( N, V ) );
-        float fall = mix( 0.34, 1.0, smoothstep( 0.0, 0.55, graze ) );
+        float fall = mix( 0.62, 1.0, smoothstep( 0.0, 0.55, graze ) );
 
         vec3 lit = c * uGain * fall;
         // Scan refresh: a very faint rolling bar, the way a camera sees LED.

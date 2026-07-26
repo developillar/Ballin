@@ -52,6 +52,7 @@ import {
   ringAt,
   ringPerimeter,
   sampleRing,
+  type Ring,
   type RingSample,
 } from './arenaGeometry';
 import {
@@ -65,7 +66,7 @@ import {
   rgb,
   type ArenaPalette,
 } from './arenaMaterials';
-import { Crowd, type CrowdDetail, type PodPlacement } from './Crowd';
+import { Crowd, crowdCapFor, type CrowdDetail, type PodPlacement } from './Crowd';
 import { buildCourtside } from './arenaProps';
 import { LIGHT_BANKS, buildRafters } from './arenaRafters';
 
@@ -109,6 +110,41 @@ function planFor(tier: string): TierPlan {
   }
 }
 
+/**
+ * The board light, per tier.
+ *
+ * §6.2 is explicit that the LED surfaces have to *cast* light — "a bright board
+ * that lights nothing is an emissive quad, and it looks like one" — and §1.3
+ * asks for a 5–15% saturation team-colour cast on the apron and the first two
+ * rows. That is bought two ways: a pair of punctual emitters on the sideline
+ * board line for the apron and the courtside furniture, and a term in the crowd
+ * shader for the seats, which carry their own lighting model.
+ *
+ * Both are budgeted here rather than switched on unconditionally: an extra
+ * punctual light is a real per-fragment cost on every standard material in the
+ * room, so `low` gets the crowd term only and no emitters at all.
+ */
+interface LedSpillPlan {
+  /** Punctual emitters per sideline board. */
+  emitters: number;
+  intensity: number;
+  /** Weight of the LED term in the crowd shader. */
+  crowd: number;
+}
+
+function ledSpillFor(tier: string): LedSpillPlan {
+  switch (tier) {
+    case 'ultra':
+      return { emitters: 1, intensity: 3.4, crowd: 0.62 };
+    case 'high':
+      return { emitters: 1, intensity: 3.2, crowd: 0.58 };
+    case 'medium':
+      return { emitters: 1, intensity: 2.6, crowd: 0.5 };
+    default:
+      return { emitters: 0, intensity: 0, crowd: 0.4 };
+  }
+}
+
 const tmp = (): RingSample => ({ x: 0, z: 0, nx: 0, nz: 0, facing: 0 });
 
 export class ArenaSystem implements System {
@@ -148,6 +184,15 @@ export class ArenaSystem implements System {
     this.buildStructure(plan);
     this.buildRibbons(ribbonTex, courtsideTex);
     this.buildCrowd(plan, q.crowdAnimated, q.crowdCount);
+
+    // The bowl's ceiling is the hardwood, and the hardwood's level is owned by
+    // `LightingSystem`. Read it rather than restate it: a hard-coded cap drifts
+    // out from under the exposure it was calibrated against and quietly stops
+    // doing anything, which is exactly what had happened to the old 0.185.
+    const court =
+      engine.get<{ grade?: { courtLuminance?: number } }>('lighting')?.grade?.courtLuminance ?? 0.19;
+    this.crowd.setUniform('uCap', crowdCapFor(court));
+    this.crowd.setUniform('uLedSpill', ledSpillFor(q.tier).crowd);
 
     const courtside = buildCourtside(this.palette, courtsideTex, SEAT_A);
     this.group.add(courtside.group);
@@ -366,37 +411,38 @@ export class ArenaSystem implements System {
         const cut = this.aisleCut(a.x, a.z, lower ? r : 99);
 
         if (cut === 2) {
-          // The mouth is a hole through the front rows. Draw its floor and its
-          // soffit once, from row 0, so the whole tunnel is sealed and reads as
-          // a dark rectangle rather than a gap in the model.
+          // The mouth is a hole through the front rows. Round 1 drew only its
+          // floor and its soffit, which left the back of the tunnel open under
+          // the seating deck onto nothing at all: the reviewer measured mean
+          // 7.6 with 9.33% of the pixels crushed at ≤ 4, i.e. §10's tell 6, a
+          // pure black void where the bowl should be. So it is built as a room
+          // now — floor, two jambs, a back wall and a concourse doorway beyond
+          // it — because a real vomitory is lit from the concourse behind it
+          // and §1.1 puts the deepest arena shadow at 6–16 and never 0.
           if (r === 0) {
-            const back = ringAt(firstOffset + ARENA.vomRows * run);
-            const perB = ringPerimeter(back);
-            const bd = tmp();
-            const be = tmp();
-            sampleRing(back, f1 * perB, bd);
-            sampleRing(back, f0 * perB, be);
-            b.matte.set('color', ...rgb(0x090c12, 0.8 + rng() * 0.3));
-            b.matte.quad(a.x, y - 0.06, a.z, c.x, y - 0.06, c.z, bd.x, y - 0.06 + rise * 0.9, bd.z, be.x, y - 0.06 + rise * 0.9, be.z);
-            b.matte.set('color', ...rgb(0x0a0d14));
-            // Soffit: the underside of the rows that bridge the tunnel.
-            b.matte.quad(
-              be.x, baseY + ARENA.vomRows * rise, be.z,
-              bd.x, baseY + ARENA.vomRows * rise, bd.z,
-              c.x, baseY + 2.25, c.z,
-              a.x, baseY + 2.25, a.z,
-            );
-            // Portal frame.
-            b.satin.set('color', ...rgb(0x1a1f2b));
-            b.satin.box((a.x + c.x) * 0.5, baseY + 2.32, (a.z + c.z) * 0.5, 0.1, 0.1, 0.1, { faces: FACE_ALL });
+            this.buildVomitory(b, rng, a, c, f0, f1, inner, perI, n, firstOffset, run, baseY, rise, y);
           }
           continue;
         }
 
-        b.matte.set('color', ...rgb(cut === 1 ? 0x2b313c : 0x1b2029, 0.82 + rng() * 0.36));
+        // The upper deck reads at 20–30 luminance from any court framing, and a
+        // 2 sRGB spread across a whole storey is what `analyze.mjs` reports as a
+        // flat field. Concrete does not sample to one value; widen the scatter
+        // where the figures are too small to break it up themselves.
+        const scatter = lower ? 0.36 : 0.78;
+        b.matte.set('color', ...rgb(cut === 1 ? 0x2b313c : 0x1b2029, 0.82 + rng() * scatter));
         b.matte.quad(a.x, y, a.z, c.x, y, c.z, d.x, y, d.z, e.x, y, e.z);
-        b.matte.set('color', ...rgb(cut === 1 ? 0x232830 : 0x12161d, 0.85 + rng() * 0.3));
+        b.matte.set('color', ...rgb(cut === 1 ? 0x232830 : 0x12161d, 0.85 + rng() * (lower ? 0.3 : 0.7)));
         b.matte.quad(e.x, y, e.z, d.x, y, d.z, d.x, y + rise, d.z, e.x, y + rise, e.z);
+
+        // Row-end step lights up top. Real upper decks are lit by their own
+        // aisle and row lighting far more than by anything reaching them from
+        // the court, and these are the high-frequency detail that stops the
+        // whole storey resolving to one number.
+        if (!lower && r % 2 === 1 && i % 5 === 2) {
+          b.emissive.set('color', ...rgb(0xcdd7ea, 0.05 + rng() * 0.035));
+          b.emissive.box((a.x + c.x) * 0.5, y + 0.018, (a.z + c.z) * 0.5, 0.13, 0.012, 0.13, { faces: FACE_TOP });
+        }
 
         if (cut === 1) {
           // Two intermediate steps: an aisle is stairs, not a ramp.
@@ -419,6 +465,117 @@ export class ArenaSystem implements System {
         }
       }
     }
+  }
+
+  /**
+   * One segment of a vomitory tunnel, built as an interior rather than a hole.
+   *
+   * Sealing it is the whole job: the mouth is 2.6 m of open geometry under the
+   * seating deck, and with nothing behind it the camera looks straight through
+   * into the clear colour. Lighting it is the other half — a concourse is lit,
+   * and the doorway glow plus the step nosings are what put a standard
+   * deviation into a region that measured 3.98.
+   */
+  private buildVomitory(
+    b: Builders,
+    rng: () => number,
+    a: RingSample,
+    c: RingSample,
+    f0: number,
+    f1: number,
+    inner: Ring,
+    perI: number,
+    n: number,
+    firstOffset: number,
+    run: number,
+    baseY: number,
+    rise: number,
+    y: number,
+  ): void {
+    const back = ringAt(firstOffset + ARENA.vomRows * run);
+    const perB = ringPerimeter(back);
+    const bd = tmp();
+    const be = tmp();
+    sampleRing(back, f1 * perB, bd);
+    sampleRing(back, f0 * perB, be);
+
+    const yFront = y - 0.06;
+    const yBack = yFront + rise * 0.9;
+    const soffitBack = baseY + ARENA.vomRows * rise;
+    const soffitFront = baseY + 2.25;
+
+    // Floor ramp up to the concourse.
+    b.matte.set('color', ...rgb(0x151b28, 0.85 + rng() * 0.3));
+    b.matte.quad(a.x, yFront, a.z, c.x, yFront, c.z, bd.x, yBack, bd.z, be.x, yBack, be.z);
+
+    // Step nosings on the ramp. These read *through* the opening, which is what
+    // says "there is a floor back there" rather than "there is nothing there".
+    for (let k = 1; k <= 2; k++) {
+      const t = k / 3;
+      const lx = a.x + (be.x - a.x) * t;
+      const lz = a.z + (be.z - a.z) * t;
+      const rx = c.x + (bd.x - c.x) * t;
+      const rz = c.z + (bd.z - c.z) * t;
+      const sy = yFront + (yBack - yFront) * t + 0.014;
+      b.emissive.set('color', ...rgb(0xd9c7a4, 0.03 + rng() * 0.012));
+      b.emissive.quad(
+        lx, sy, lz,
+        rx, sy, rz,
+        rx + a.nx * 0.11, sy, rz + a.nz * 0.11,
+        lx + a.nx * 0.11, sy, lz + a.nz * 0.11,
+      );
+    }
+
+    // Back wall, closing the tunnel off, with the concourse doorway on it.
+    b.satin.set('color', ...rgb(0x131924, 0.8 + rng() * 0.4));
+    b.satin.quad(be.x, yBack, be.z, bd.x, yBack, bd.z, bd.x, soffitBack, bd.z, be.x, soffitBack, be.z);
+
+    const mx = (be.x + bd.x) * 0.5;
+    const mz = (be.z + bd.z) * 0.5;
+    const ix = -be.nx * 0.05;
+    const iz = -be.nz * 0.05;
+    const dl = (p: RingSample): [number, number] => [p.x * 0.34 + mx * 0.66 + ix, p.z * 0.34 + mz * 0.66 + iz];
+    const [lx0, lz0] = dl(be);
+    const [rx0, rz0] = dl(bd);
+    b.emissive.set('color', ...rgb(0xffc98f, 0.040 + rng() * 0.018));
+    b.emissive.quad(
+      lx0, yBack + 0.22, lz0,
+      rx0, yBack + 0.22, rz0,
+      rx0, yBack + 1.85, rz0,
+      lx0, yBack + 1.85, lz0,
+    );
+
+    // Jambs, but only on the two segments that actually bound the mouth — a
+    // vomitory spans two to three ring segments and a wall down the middle of
+    // one would be a wall down the middle of the tunnel.
+    const nb = tmp();
+    sampleRing(inner, ((f0 * n - 0.5) / n) * perI, nb);
+    const openLeft = this.aisleCut(nb.x, nb.z, 0) !== 2;
+    sampleRing(inner, ((f1 * n + 0.5) / n) * perI, nb);
+    const openRight = this.aisleCut(nb.x, nb.z, 0) !== 2;
+
+    const jamb = (p: RingSample, q: RingSample): void => {
+      b.satin.set('color', ...rgb(0x1a2230, 0.75 + rng() * 0.5));
+      // Both windings: which face of a tunnel jamb the camera is on depends on
+      // which side of the bowl the vomitory sits, and 32 triangles is cheaper
+      // than getting that wrong on half of them.
+      b.satin.quad(p.x, yFront, p.z, q.x, yBack, q.z, q.x, soffitBack, q.z, p.x, soffitFront, p.z);
+      b.satin.quad(p.x, soffitFront, p.z, q.x, soffitBack, q.z, q.x, yBack, q.z, p.x, yFront, p.z);
+    };
+    if (openLeft) jamb(a, be);
+    if (openRight) jamb(c, bd);
+
+    // Soffit: the underside of the rows that bridge the tunnel.
+    b.matte.set('color', ...rgb(0x0e131c));
+    b.matte.quad(
+      be.x, soffitBack, be.z,
+      bd.x, soffitBack, bd.z,
+      c.x, soffitFront, c.z,
+      a.x, soffitFront, a.z,
+    );
+    // Portal lintel.
+    b.satin.set('color', ...rgb(0x1a1f2b));
+    b.satin.box((a.x + c.x) * 0.5, soffitFront + 0.07, (a.z + c.z) * 0.5, 0.1, 0.1, 0.1, { faces: FACE_ALL });
   }
 
   /** Mid concourse wall, walkway, aisle lights and exit signage. */
@@ -531,30 +688,82 @@ export class ArenaSystem implements System {
       b.matte.quad(a.x, y0, a.z, c.x, y0, c.z, c.x, y0 + 3.4, c.z, a.x, y0 + 3.4, a.z);
       b.matte.set('color', ...rgb(0x0c1017, 0.7 + rng() * 0.6));
       b.matte.quad(a.x, y0 + 3.4, a.z, c.x, y0 + 3.4, c.z, c.x, ARENA.roofY + 1.4, c.z, a.x, ARENA.roofY + 1.4, a.z);
-      // A lit portal every few bays — the upper concourse behind the top deck.
-      if (i % 3 === 1) {
-        const ix = a.nx * 0.05;
-        const iz = a.nz * 0.05;
-        b.emissive.set('color', ...rgb(0xffd2a4, 0.035 + rng() * 0.035));
-        const mx = (a.x + c.x) * 0.5;
-        const mz = (a.z + c.z) * 0.5;
-        b.emissive.quad(
-          a.x * 0.35 + mx * 0.65 - ix, y0 + 0.35, a.z * 0.35 + mz * 0.65 - iz,
-          c.x * 0.35 + mx * 0.65 - ix, y0 + 0.35, c.z * 0.35 + mz * 0.65 - iz,
-          c.x * 0.35 + mx * 0.65 - ix, y0 + 1.85, c.z * 0.35 + mz * 0.65 - iz,
-          a.x * 0.35 + mx * 0.65 - ix, y0 + 1.85, a.z * 0.35 + mz * 0.65 - iz,
-        );
+      const ix = a.nx * 0.05;
+      const iz = a.nz * 0.05;
+      const mx = (a.x + c.x) * 0.5;
+      const mz = (a.z + c.z) * 0.5;
+      /** A quad inset into this bay, `w` of its width, between two heights. */
+      const bay = (w: number, yA: number, yB: number): void => {
+        const lx = a.x * w + mx * (1 - w) - ix;
+        const lz = a.z * w + mz * (1 - w) - iz;
+        const cx2 = c.x * w + mx * (1 - w) - ix;
+        const cz2 = c.z * w + mz * (1 - w) - iz;
+        b.emissive.quad(lx, yA, lz, cx2, yA, cz2, cx2, yB, cz2, lx, yB, lz);
+      };
+
+      // A lit portal every other bay — the upper concourse behind the top deck.
+      // Every third was too sparse to break up the facade: `analyze.mjs` found
+      // its flattest 159 px window here at sd 3.77, against §1.1's 6.
+      if (i % 2 === 1) {
+        b.emissive.set('color', ...rgb(0xffd2a4, 0.05 + rng() * 0.045));
+        bay(0.35, y0 + 0.35, y0 + 1.85);
       }
       if (i % 7 === 3) {
         b.emissive.set('color', ...rgb(0x2fd07a, 0.7));
         b.emissive.box(a.x - a.nx * 0.09, y0 + 2.85, a.z - a.nz * 0.09, 0.26, 0.08, 0.26, { faces: FACE_ALL });
       }
+
+      // Press / club glass across the top storey. §6.1 asks for a suite band and
+      // a lower/upper break that stay legible at 20–45 luminance; a glass band
+      // whose *interiors* differ bay to bay is what makes it read as rooms
+      // rather than as a stripe.
+      b.satin.set('color', ...rgb(0x0a0e16, 0.6 + rng() * 0.8));
+      b.satin.quad(a.x - ix, y0 + 4.1, a.z - iz, c.x - ix, y0 + 4.1, c.z - iz, c.x - ix, y0 + 6.0, c.z - iz, a.x - ix, y0 + 6.0, a.z - iz);
+      if (rng() < 0.55) {
+        b.emissive.set('color', ...rgb(0xf7dcb4, 0.018 + rng() * 0.05));
+        bay(0.28, y0 + 4.45, y0 + 5.55);
+      }
+      b.steel.set('color', ...rgb(0x333b4c, 0.8 + rng() * 0.4));
+      b.steel.box(a.x - a.nx * 0.08, y0 + 5.05, a.z - a.nz * 0.08, 0.07, 0.95, 0.07, { faces: FACE_ALL });
+
       // Fascia lip catching the rigging light.
       b.steel.set('color', ...rgb(0x2a3040, 0.85 + rng() * 0.3));
-      b.steel.box((a.x + c.x) * 0.5 - a.nx * 0.1, y0 + 3.5, (a.z + c.z) * 0.5 - a.nz * 0.1, 1.35, 0.11, 1.35, {
+      b.steel.box(mx - a.nx * 0.1, y0 + 3.5, mz - a.nz * 0.1, 1.35, 0.11, 1.35, {
         faces: FACE_ALL,
         rotY: Math.atan2(a.nx, a.nz),
       });
+
+      // §6.1: "the light banks themselves as bright quads". These are the
+      // house downlights on the underside of the upper fascia and a catwalk
+      // run above the club glass — the only things in the top ninth of a court
+      // framing that are not dark, and they are what the ceiling was missing.
+      if (i % 2 === 0) {
+        b.emissive.set('color', ...rgb(0xdfe9ff, 0.075 + rng() * 0.03));
+        b.emissive.box(mx - a.nx * 0.24, y0 + 3.40, mz - a.nz * 0.24, 0.2, 0.02, 0.2, {
+          faces: FACE_ALL,
+          rotY: Math.atan2(a.nx, a.nz),
+        });
+      }
+      if (i % 3 === 0) {
+        b.steel.set('color', ...rgb(0x39424f, 0.8 + rng() * 0.5));
+        b.steel.box(mx - a.nx * 0.55, y0 + 6.55, mz - a.nz * 0.55, 1.2, 0.06, 0.5, {
+          faces: FACE_ALL,
+          rotY: Math.atan2(a.nx, a.nz),
+        });
+        b.emissive.set('color', ...rgb(0xe6eeff, 0.085 + rng() * 0.035));
+        b.emissive.box(mx - a.nx * 0.55, y0 + 6.44, mz - a.nz * 0.55, 0.26, 0.02, 0.16, {
+          faces: FACE_ALL,
+          rotY: Math.atan2(a.nx, a.nz),
+        });
+      }
+      // Hung speaker box every eighth bay: a silhouette against the shell.
+      if (i % 8 === 5) {
+        b.matte.set('color', ...rgb(0x14171e, 0.9));
+        b.matte.box(mx - a.nx * 1.5, y0 + 7.3, mz - a.nz * 1.5, 0.42, 0.7, 0.3, {
+          faces: FACE_ALL,
+          rotY: Math.atan2(a.nx, a.nz),
+        });
+      }
     }
   }
 
@@ -595,7 +804,7 @@ export class ArenaSystem implements System {
         ringAt(this.lowerTopOffset + ARENA.mid.thickness - 0.05),
         ARENA.suiteTop - 0.62, ARENA.suiteTop - 0.08, 1 / 4.2, 1.0,
       );
-      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1700, pixelsV: 14, scroll: 0.038, gain: 1.6 });
+      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1700, pixelsV: 14, scroll: 0.038, gain: 2.2 });
       this.ledMaterials.push(mat);
       const mesh = new Mesh(geo, mat);
       mesh.name = 'arena.led.suite';
@@ -608,7 +817,11 @@ export class ArenaSystem implements System {
     {
       const top = ARENA.mid.top;
       const geo = buildRingStrip(ringAt(this.lowerTopOffset - 0.03), top - 1.22, top - 0.55, 1 / 3.4, 0.85);
-      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1600, pixelsV: 16, scroll: -0.05, gain: 1.85 });
+      // §6.2 puts the boards at 190–250 — the brightest continuous elements in
+      // the frame after direct fixtures, and above display white so bloom has
+      // something legitimate to grab. Round 1 measured this band peaking at 137
+      // and *darker* than the crowd sitting in front of it.
+      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1600, pixelsV: 16, scroll: -0.05, gain: 2.4 });
       this.ledMaterials.push(mat);
       const mesh = new Mesh(geo, mat);
       mesh.name = 'arena.led.ribbon';
@@ -639,7 +852,15 @@ export class ArenaSystem implements System {
     this.addCrowdBlock('nearBowl', near, plan.pitch, pods(near.length, 0.34), plan.nearDetail, plan.occupancy, plan.phoneRate, animated, SEAT_A);
     this.addCrowdBlock('farBowl', far, plan.pitch, pods(far.length, 0.42), plan.farDetail, plan.occupancy, plan.phoneRate, animated, SEAT_B);
     if (upper.length) {
-      this.addCrowdBlock('upperBowl', upper, plan.upperPitch, pods(upper.length, 0.16), 0, plan.occupancy * 0.94, 0, animated, SEAT_B);
+      // The upper deck gets phones too. It had none, and it is both the darkest
+      // part of the bowl and most of the bowl's area in any court framing —
+      // exactly where §6.3's scattered screen points do their work. The rate is
+      // lifted because a phone up here is one or two pixels and a fair number
+      // of them are behind someone's head.
+      this.addCrowdBlock(
+        'upperBowl', upper, plan.upperPitch, pods(upper.length, 0.16), 0,
+        plan.occupancy * 0.94, plan.phoneRate * 1.6, animated, SEAT_B,
+      );
     }
     if (front.length) {
       this.addCrowdBlock(
@@ -795,13 +1016,36 @@ export class ArenaSystem implements System {
   }
 
   /**
-   * The boards have to *light* something or they read as stickers. Three cheap
-   * point lights — one per baseline board, one under the jumbotron — put a
-   * team-coloured kick on the apron and the stanchion padding.
+   * The boards have to *light* something or they read as stickers (§10 tell 34).
+   *
+   * Two populations, and they are deliberately different colours, because §1.3
+   * asks for a *visible hue shift between the apron nearest the boards and the
+   * apron under the basket* and a single tint everywhere cannot produce one:
+   *
+   *  - the sideline courtside boards, which run the length of the room and are
+   *    the arena's dominant coloured source — team blue, matching the dominant
+   *    panel on the strip bake;
+   *  - the baseline ends, which sit behind the stanchion and are mostly warm
+   *    house light and hardwood bounce by the time anything reaches the floor.
+   *
+   * Round 1 had the ends saturated blue and orange and no sideline source at
+   * all, which is why the two aprons measured out at the same hue.
    */
   private buildPracticals(tier: string): void {
+    const spill = ledSpillFor(tier);
+
+    // Sideline LED emitters, on the courtside board line.
+    for (let i = 0; i < spill.emitters; i++) {
+      for (const sz of [1, -1] as const) {
+        const l = new PointLight(0x3f6ae8, spill.intensity, 17, 2);
+        l.position.set(0, 1.05, sz * (APRON_HZ + 0.85));
+        l.castShadow = false;
+        this.group.add(l);
+      }
+    }
+
     for (const sx of [1, -1] as const) {
-      const l = new PointLight(sx > 0 ? 0x4f7dff : 0xff7d4f, 5.0, 13, 2.2);
+      const l = new PointLight(0xffb27a, 2.4, 11, 2.2);
       l.position.set(sx * (APRON_HX - 0.35), 0.85, 0);
       l.castShadow = false;
       this.group.add(l);

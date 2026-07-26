@@ -35,10 +35,13 @@
  */
 
 import {
+  BufferAttribute,
+  BufferGeometry,
   Color,
   DynamicDrawUsage,
   InstancedBufferAttribute,
   InstancedMesh,
+  Matrix4,
   Object3D,
   ShaderMaterial,
   StaticDrawUsage,
@@ -58,6 +61,8 @@ const PART_PHONE = 6;
 const PART_SHIN = 7;
 const PART_FOREARM = 8;
 const PART_NECK = 9;
+/** A phone held against the chest — the LOD-0/1 stand-in, with no arm to ride. */
+const PART_CHESTPHONE = 10;
 
 // -----------------------------------------------------------------------------
 // Skeleton
@@ -209,13 +214,119 @@ function limb(
   }
 }
 
+const _IDENT = /* @__PURE__ */ new Matrix4();
+
+/** One elliptical section of a {@link prism}: `[y, radiusX, radiusZ, centreZ]`. */
+type Section = readonly [number, number, number, number];
+
+/**
+ * A closed prism lofted through a stack of elliptical sections, with the
+ * normals **smoothed around the cross-section**.
+ *
+ * This is the difference between a head and a die. `MeshBuilder.box` and
+ * `MeshBuilder.quad` are flat-shaded by construction — every vertex of a face
+ * carries the same normal — so a four-sided box lit by any model at all
+ * resolves to at most four constant-colour rectangles. No amount of extra
+ * lighting maths changes that: the shading input does not vary across the face.
+ * An eight-sided section whose vertex normals follow the ellipse gives the
+ * fragment stage something to interpolate, so a skull reads as round and its
+ * silhouette stops being two vertical lines and a corner.
+ *
+ * Eight sides costs 16 triangles per segment. The sections are seeded half a
+ * step round so a *face* points down local −Z at the court rather than an edge —
+ * an edge-on vertex column puts a hard specular seam down the middle of every
+ * face the camera sees.
+ */
+function prism(
+  b: MeshBuilder,
+  cx: number,
+  sections: readonly Section[],
+  sides: number,
+  capTop: boolean,
+): void {
+  const rows = sections.length;
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const idx: number[] = [];
+  const cs: number[] = [];
+  const sn: number[] = [];
+  for (let j = 0; j < sides; j++) {
+    const a = ((j + 0.5) / sides) * Math.PI * 2;
+    cs.push(Math.cos(a));
+    sn.push(Math.sin(a));
+  }
+
+  for (let i = 0; i < rows; i++) {
+    const [y, rx, rz, cz] = sections[i];
+    // Tip the smoothed normal with the taper, or a narrowing skull shades like
+    // a barrel and the crown stays as dark as the temple.
+    const lo = sections[Math.max(0, i - 1)];
+    const hi = sections[Math.min(rows - 1, i + 1)];
+    const dy = hi[0] - lo[0];
+    const ny = dy > 1e-6 ? -((hi[1] + hi[2]) * 0.5 - (lo[1] + lo[2]) * 0.5) / dy : 0;
+    for (let j = 0; j < sides; j++) {
+      pos.push(cx + rx * cs[j], y, cz + rz * sn[j]);
+      const nx = cs[j] / Math.max(rx, 1e-4);
+      const nz = sn[j] / Math.max(rz, 1e-4);
+      const l = Math.hypot(nx, ny, nz) || 1;
+      nor.push(nx / l, ny / l, nz / l);
+    }
+  }
+
+  for (let i = 0; i < rows - 1; i++) {
+    for (let j = 0; j < sides; j++) {
+      const j1 = (j + 1) % sides;
+      const a0 = i * sides + j;
+      const b0 = i * sides + j1;
+      const c1 = (i + 1) * sides + j1;
+      const d1 = (i + 1) * sides + j;
+      idx.push(a0, d1, c1, a0, c1, b0);
+    }
+  }
+  if (capTop) {
+    const top = sections[rows - 1];
+    const centre = pos.length / 3;
+    pos.push(cx, top[0], top[3]);
+    nor.push(0, 1, 0);
+    const base = (rows - 1) * sides;
+    for (let j = 0; j < sides; j++) idx.push(centre, base + ((j + 1) % sides), base + j);
+  }
+
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('normal', new BufferAttribute(new Float32Array(nor), 3));
+  geo.setIndex(idx);
+  b.merge(geo, _IDENT);
+  geo.dispose();
+}
+
+/**
+ * A phone screen. Emitted with both windings and a hair of separation: the pose
+ * solve swings the forearm through a wide arc, so which face of a two-triangle
+ * quad ends up pointing at the camera is not knowable at build time, and a phone
+ * that back-face culls itself away is the §6.3 point light that never appears.
+ */
+function screenQuad(
+  b: MeshBuilder,
+  x0: number, y0: number, z0: number,
+  x1: number, y1: number, z1: number,
+): void {
+  b.quad(x0, y0, z0, x1, y0, z0, x1, y1, z1, x0, y1, z1);
+  b.quad(x0, y1, z1 - 0.0015, x1, y1, z1 - 0.0015, x1, y0, z0 - 0.0015, x0, y0, z0 - 0.0015);
+}
+
 /**
  * One pod: `podSize` seats side by side along local +X, all facing local −Z.
  *
- * Triangle budget per seat: 18 at detail 0 (upper bowl, ~10 px figures), 48 at
- * detail 1 (far lower bowl), 108 at detail 2 (near lower bowl) and 140 at
+ * Triangle budget per seat: 22 at detail 0 (upper bowl, ~10 px figures), 52 at
+ * detail 1 (far lower bowl), ~168 at detail 2 (near lower bowl) and ~216 at
  * detail 3 (courtside, where the figures are 60–120 px and every one of those
  * triangles is doing visible work).
+ *
+ * The jump at detail 2 buys the rounded head, torso and hair — see {@link prism}.
+ * `detail` is chosen per block by the arena's tier plan, so the cost is a
+ * `Quality` decision and the far bowl, where a spectator is 15 px tall and a
+ * round skull is invisible, keeps the cheap boxes.
  */
 function buildPod(podSize: number, pitch: number, detail: CrowdDetail): MeshBuilder {
   const b = new MeshBuilder();
@@ -280,19 +391,19 @@ function buildPod(podSize: number, pitch: number, detail: CrowdDetail): MeshBuil
     // the top of the body is a flat slab and a bowl full of them reads as a
     // field of envelopes.
     b.set('aPart', PART_TORSO);
-    if (detail >= 2) {
-      b.box(bx, 0.683, 0.196, 0.170, 0.117, 0.112, {
-        faces: FACE_SIDES,
-        bottomScaleX: 0.90,
-        bottomScaleZ: 0.94,
-        topScaleX: 1.02,
-      });
-      b.box(bx, 0.883, 0.192, 0.176, 0.083, 0.114, {
-        faces: FACE_SIDES | FACE_TOP,
-        topScaleX: 0.64,
-        topScaleZ: 0.76,
-        shearZ: 0.010,
-      });
+    if (detail >= 3) {
+      prism(b, bx, [
+        [0.566, 0.150, 0.104, 0.196],
+        [0.720, 0.170, 0.112, 0.195],
+        [0.862, 0.179, 0.115, 0.193],
+        [0.966, 0.112, 0.086, 0.202],
+      ], 8, true);
+    } else if (detail >= 2) {
+      prism(b, bx, [
+        [0.566, 0.150, 0.104, 0.196],
+        [0.800, 0.176, 0.114, 0.194],
+        [0.966, 0.112, 0.086, 0.202],
+      ], 8, true);
     } else if (detail >= 1) {
       b.box(bx, 0.775, 0.194, 0.172, 0.190, 0.113, {
         faces: FACE_OPEN_BOTTOM,
@@ -322,22 +433,23 @@ function buildPod(podSize: number, pitch: number, detail: CrowdDetail): MeshBuil
 
     // --- head ----------------------------------------------------------------
     b.set('aPart', PART_HEAD);
-    if (detail >= 2) {
-      // Jaw: widens upward off the neck.
-      b.box(bx, 1.080, 0.174, 0.068, 0.041, 0.074, {
-        faces: FACE_SIDES,
-        bottomScaleX: 0.70,
-        bottomScaleZ: 0.76,
-      });
-      // Cranium: narrows again toward the crown, so the profile is round-ish
-      // instead of the cube that a single box gives.
-      b.box(bx, 1.156, 0.174, 0.074, 0.036, 0.079, {
-        faces: FACE_SIDES | FACE_TOP,
-        bottomScaleX: 0.94,
-        bottomScaleZ: 0.96,
-        topScaleX: 0.76,
-        topScaleZ: 0.80,
-      });
+    if (detail >= 3) {
+      // Chin, jaw, temple, crown. Four sections and eight sides means the
+      // silhouette of a 90 px courtside head is a twelve-segment curve, not a
+      // rectangle, and the value across the face runs from the lit temple to
+      // the shadowed cheek instead of sitting at one number.
+      prism(b, bx, [
+        [1.039, 0.048, 0.056, 0.174],
+        [1.086, 0.066, 0.073, 0.176],
+        [1.140, 0.072, 0.079, 0.175],
+        [1.192, 0.056, 0.062, 0.173],
+      ], 8, true);
+    } else if (detail >= 2) {
+      prism(b, bx, [
+        [1.039, 0.050, 0.058, 0.174],
+        [1.110, 0.070, 0.077, 0.175],
+        [1.192, 0.057, 0.063, 0.173],
+      ], 8, true);
     } else if (detail >= 1) {
       b.box(bx, 1.120, 0.174, 0.076, 0.078, 0.081, {
         faces: FACE_SIDES | FACE_TOP,
@@ -353,14 +465,27 @@ function buildPod(podSize: number, pitch: number, detail: CrowdDetail): MeshBuil
     // --- hair ----------------------------------------------------------------
     if (detail >= 1) {
       b.set('aPart', PART_HAIR);
-      b.box(bx, HAIR_BASE + 0.046, 0.174, 0.079, 0.046, 0.084, {
-        faces: FACE_SIDES | FACE_TOP,
-        bottomScaleX: 1.03,
-        bottomScaleZ: 1.03,
-        topScaleX: 0.62,
-        topScaleZ: 0.68,
-        shearZ: -0.006,
-      });
+      if (detail >= 3) {
+        prism(b, bx, [
+          [HAIR_BASE, 0.081, 0.086, 0.174],
+          [HAIR_BASE + 0.050, 0.076, 0.081, 0.172],
+          [HAIR_BASE + 0.094, 0.046, 0.054, 0.168],
+        ], 8, true);
+      } else if (detail >= 2) {
+        prism(b, bx, [
+          [HAIR_BASE, 0.081, 0.086, 0.174],
+          [HAIR_BASE + 0.092, 0.049, 0.057, 0.168],
+        ], 8, true);
+      } else {
+        b.box(bx, HAIR_BASE + 0.046, 0.174, 0.079, 0.046, 0.084, {
+          faces: FACE_SIDES | FACE_TOP,
+          bottomScaleX: 1.03,
+          bottomScaleZ: 1.03,
+          topScaleX: 0.62,
+          topScaleZ: 0.68,
+          shearZ: -0.006,
+        });
+      }
     }
 
     // --- arms ----------------------------------------------------------------
@@ -383,13 +508,22 @@ function buildPod(podSize: number, pitch: number, detail: CrowdDetail): MeshBuil
       b.set('aPart', PART_PHONE);
       b.set('aSide', 1);
       const px = bx + HAND_X * 0.92;
-      b.quad(
-        px - 0.018, HAND_Y + 0.010, HAND_Z - 0.040,
-        px + 0.018, HAND_Y + 0.010, HAND_Z - 0.040,
-        px + 0.018, HAND_Y + 0.062, HAND_Z - 0.028,
-        px - 0.018, HAND_Y + 0.062, HAND_Z - 0.028,
+      screenQuad(
+        b,
+        px - 0.016, HAND_Y + 0.010, HAND_Z - 0.040,
+        px + 0.016, HAND_Y + 0.058, HAND_Z - 0.028,
       );
       b.set('aSide', 0);
+    } else {
+      // §6.3's scattered phone points are the cheapest thing in the whole
+      // rubric that sells a dark bowl, and the upper deck — which is most of
+      // the bowl area in any court framing — is exactly where the darkness
+      // needs selling. There is no arm up here to hang a phone off, so it is
+      // four triangles held against the chest, which at 10–20 px is the same
+      // picture.
+      b.set('aPart', PART_CHESTPHONE);
+      const cz = detail >= 1 ? 0.078 : 0.081;
+      screenQuad(b, bx + 0.026, 0.852, cz, bx + 0.062, 0.900, cz);
     }
   }
   return b;
@@ -415,32 +549,18 @@ const CROWD_VERT = /* glsl */ `
   uniform float uOccupancy;
   uniform float uPhoneRate;
   uniform float uPhoneLit;
-  uniform float uExposure;
   uniform float uPhoneGain;
   uniform float uStandRate;
   uniform float uHasShin;
   uniform float uStandRise;
   uniform vec3  uSeatCol;
-  uniform vec3  uKeyDir;
-  uniform vec3  uKeyCol;
-  uniform vec3  uFillDir;
-  uniform vec3  uFillCol;
-  uniform vec3  uAmbTop;
-  uniform vec3  uAmbBot;
-  uniform vec3  uSpillCol;
-  uniform vec3  uRimDir;
-  uniform vec3  uRimCol;
-  uniform vec3  uHazeCol;
-  uniform vec3  uFloorCol;
-  uniform vec2  uHazeRange;
-  uniform float uHazeAmount;
-  uniform float uRim;
-  uniform float uSpec;
-  uniform float uClimbFall;
-  uniform float uCap;
   uniform float uAnimate;
 
-  varying vec3 vCol;
+  varying vec3 vAlbedo;
+  varying vec3 vNormal;
+  varying vec3 vWorld;
+  /** x: specular sheen, y: ambient occlusion, z: row tone, w: screen emission. */
+  varying vec4 vShade;
 
   const vec3 HIP   = vec3( 0.0, ${f(HIP_Y)}, ${f(HIP_Z)} );
   const vec3 KNEE  = vec3( 0.0, ${f(KNEE_Y)}, ${f(KNEE_Z)} );
@@ -522,8 +642,10 @@ const CROWD_VERT = /* glsl */ `
     vec3 n = normal;
     float rel = 0.0;
     float stand = 0.0;
-    bool isPhone = part > 5.5 && part < 6.5;
-    bool isFore  = ( part > 7.5 && part < 8.5 ) || isPhone;
+    bool isHandPhone  = part > 5.5 && part < 6.5;
+    bool isChestPhone = part > 9.5;
+    bool isPhone = isHandPhone || isChestPhone;
+    bool isFore  = ( part > 7.5 && part < 8.5 ) || isHandPhone;
     bool isUpper = part > 4.5 && part < 5.5;
     bool isArm   = isFore || isUpper;
     bool isLeg   = ( part > 0.5 && part < 1.5 ) || ( part > 6.5 && part < 7.5 );
@@ -681,7 +803,14 @@ const CROWD_VERT = /* glsl */ `
       float tone = 0.26 + kSkin * kSkin * 0.82;
       albedo = vec3( 0.215, 0.126, 0.088 ) * tone + vec3( 0.010, 0.005, 0.004 );
       sheen = 0.45;
-    } else if ( part > 8.5 ) {
+    } else if ( isPhone ) {
+      albedo = vec3( 0.40, 0.47, 0.66 );
+      // Sparse on purpose: a bowl where every phone is lit is a string of
+      // fairy lights, not an arena. The ones that are lit sit above the §6.3
+      // bloom threshold, which is what makes them read as screens.
+      emissive = uPhoneGain * step( rnd( id + 31.0 ), uPhoneLit )
+               * ( 0.80 + 0.20 * sin( uTime * 3.1 + kPh * 20.0 ) );
+    } else if ( part > 8.5 && part < 9.5 ) {
       // Neck: skin, but it sits in the shadow of the jaw.
       float tone = 0.26 + kSkin * kSkin * 0.82;
       albedo = vec3( 0.215, 0.126, 0.088 ) * tone * 0.72;
@@ -693,12 +822,6 @@ const CROWD_VERT = /* glsl */ `
         albedo = vec3( g * 1.14, g * 0.95, g * 0.84 );
         sheen = 0.40;
       }
-    } else if ( isPhone ) {
-      albedo = vec3( 0.40, 0.47, 0.66 );
-      // Sparse on purpose: a bowl where every phone is lit is a string of
-      // fairy lights, not an arena.
-      emissive = uPhoneGain * step( rnd( id + 31.0 ), uPhoneLit )
-               * ( 0.80 + 0.20 * sin( uTime * 3.1 + kPh * 20.0 ) );
     } else if ( isArm ) {
       // Sleeved for most, bare skin for the rest.
       if ( rnd( id + 23.0 ) < 0.72 ) {
@@ -717,7 +840,65 @@ const CROWD_VERT = /* glsl */ `
     // --- transform ----------------------------------------------------------
     vec4 world = modelMatrix * instanceMatrix * vec4( p, 1.0 );
     mat3 im = mat3( instanceMatrix );
-    vec3 N = normalize( mat3( modelMatrix ) * ( im * n ) );
+
+    // Self-occlusion down the body: rows shadow each other and a seated torso
+    // shadows its own lap.
+    float ao = mix( 0.20, 1.0, smoothstep( 0.08, 1.05, rel ) );
+    if ( isSeat ) ao = 0.42;
+
+    // Everything the fragment stage needs, and nothing it can derive itself.
+    // The *lighting* deliberately does not happen here: a face shaded per
+    // vertex resolves to one constant colour, because every vertex of a flat
+    // face carries the same normal. That is what made the bowl a field of
+    // rectangles no matter how many triangles it was given.
+    vAlbedo = albedo;
+    vNormal = mat3( modelMatrix ) * ( im * n );
+    vWorld  = world.xyz;
+    vShade  = vec4( sheen, ao, iTone, emissive );
+
+    gl_Position = projectionMatrix * viewMatrix * world;
+  }
+`;
+
+const CROWD_FRAG = /* glsl */ `
+  #include <common>
+
+  uniform vec3  uKeyDir;
+  uniform vec3  uKeyCol;
+  uniform vec3  uFillDir;
+  uniform vec3  uFillCol;
+  uniform vec3  uAmbTop;
+  uniform vec3  uAmbBot;
+  uniform vec3  uSpillCol;
+  uniform vec3  uLedCol;
+  uniform float uLedSpill;
+  uniform vec3  uRimDir;
+  uniform vec3  uRimCol;
+  uniform vec3  uHazeCol;
+  uniform vec3  uFloorCol;
+  uniform vec2  uHazeRange;
+  uniform float uHazeAmount;
+  uniform float uRim;
+  uniform float uSpec;
+  uniform float uExposure;
+  uniform float uClimbFall;
+  uniform float uCap;
+
+  varying vec3 vAlbedo;
+  varying vec3 vNormal;
+  varying vec3 vWorld;
+  varying vec4 vShade;
+
+  void main() {
+    // The one line that matters: an interpolated, per-pixel normal. On a flat
+    // face this is numerically identical to what the vertex stage produced, so
+    // the measured bowl-to-court ratio does not move; on the rounded head and
+    // torso sections it is what puts a value gradient across a face.
+    vec3 N = normalize( vNormal );
+    vec3 albedo = vAlbedo;
+    float sheen = vShade.x;
+    float ao    = vShade.y;
+    float tone  = vShade.z;
 
     // --- lighting -----------------------------------------------------------
     // The bowl is not lit by the court banks; it catches their spill, the
@@ -726,10 +907,6 @@ const CROWD_VERT = /* glsl */ `
     float ndK = max( dot( N, uKeyDir ), 0.0 );
     float ndF = max( dot( N, uFillDir ), 0.0 );
     float hemi = 0.5 + 0.5 * N.y;
-    // Self-occlusion down the body: rows shadow each other and a seated torso
-    // shadows its own lap.
-    float ao = mix( 0.20, 1.0, smoothstep( 0.08, 1.05, rel ) );
-    if ( isSeat ) ao = 0.42;
 
     vec3 lit = albedo * (
         uKeyCol * ndK
@@ -738,16 +915,24 @@ const CROWD_VERT = /* glsl */ `
       + uAmbBot * ( 1.0 - hemi )
     ) * ao;
 
-    // Courtside LED / hardwood spill: strongest on the lowest rows, which is
-    // what iTone encodes.
-    lit += albedo * uSpillCol * max( iTone - 1.0, 0.0 ) * ( 0.30 + 0.70 * ndF );
+    // Two separate near-floor sources, because they are two different colours
+    // and §1.3 asks for both. uSpillCol is the warm hardwood bounce; the LED
+    // term is the ribbon and courtside boards, which are team-coloured and fall
+    // off much faster with height — hence the squared weight. tone encodes
+    // how close the row is to the floor and the boards.
+    float near = max( tone - 1.0, 0.0 );
+    lit += albedo * uSpillCol * near * ( 0.30 + 0.70 * ndF );
+    lit += albedo * uLedCol * ( near * near * uLedSpill ) * ( 0.35 + 0.65 * ndF );
 
-    vec3 V = normalize( cameraPosition - world.xyz );
+    vec3 V = normalize( cameraPosition - vWorld );
 
+    #if CROWD_HQ
     // Nothing in frame has zero specular (§1.4) — a broad, low lobe, stronger
-    // on the shell jackets than on knitwear.
+    // on the shell jackets than on knitwear. Off in the far and upper bowl,
+    // where a spectator is 15 px and a specular lobe is not resolvable.
     vec3 H = normalize( uKeyDir + V );
     lit += uKeyCol * pow( max( dot( N, H ), 0.0 ), 16.0 ) * uSpec * sheen * ao;
+    #endif
 
     // Rim. Directional, not a Fresnel halo (§10.4): it only fires where the
     // surface turns up and away from the court, so it lands on the tops of
@@ -763,12 +948,14 @@ const CROWD_VERT = /* glsl */ `
     // The bowl's whole tonal range has to fit inside §1.1's 18–45 band, which
     // is 1.3 stops wide, so the front-row-to-upper-deck gradient is deliberately
     // gentle: present, readable, and about half a stop end to end.
-    float climb = 1.0 / ( 1.0 + max( world.y - 0.9, 0.0 ) * uClimbFall );
-    lit *= uExposure * mix( 1.0, iTone, 0.72 ) * climb;
+    float climb = 1.0 / ( 1.0 + max( vWorld.y - 0.9, 0.0 ) * uClimbFall );
+    lit *= uExposure * mix( 1.0, tone, 0.72 ) * climb;
 
     // §6.3, stated flatly: the crowd must never be brighter than the near
     // hardwood. A soft knee rather than a clamp, so a white shirt catching the
     // spill still reads as a white shirt instead of turning into a grey card.
+    // uCap is driven off the lighting rig's hardwood radiance, not guessed —
+    // see crowdCapFor() on the TypeScript side.
     float lum = dot( lit, vec3( 0.2126, 0.7152, 0.0722 ) );
     if ( lum > uCap ) {
       float over = lum - uCap;
@@ -776,25 +963,17 @@ const CROWD_VERT = /* glsl */ `
     }
 
     // Phone screens are the one thing in the bowl allowed above that ceiling.
-    lit += albedo * emissive;
+    lit += albedo * vShade.w;
 
     // Depth cueing — far stands lose contrast, which is most of what makes a
     // big room read as big.
-    float d = length( cameraPosition - world.xyz );
+    float d = length( cameraPosition - vWorld );
     float haze = smoothstep( uHazeRange.x, uHazeRange.y, d ) * uHazeAmount;
     // Floor the bowl off the black point: crushed regions with no detail are a
     // named tell, and a real building always has some ambient spill.
-    vCol = max( mix( lit, uHazeCol, haze ), uFloorCol );
+    vec3 col = max( mix( lit, uHazeCol, haze ), uFloorCol );
 
-    gl_Position = projectionMatrix * viewMatrix * world;
-  }
-`;
-
-const CROWD_FRAG = /* glsl */ `
-  #include <common>
-  varying vec3 vCol;
-  void main() {
-    gl_FragColor = vec4( max( vCol, vec3( 0.0 ) ), 1.0 );
+    gl_FragColor = vec4( max( col, vec3( 0.0 ) ), 1.0 );
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
@@ -820,6 +999,8 @@ export interface CrowdUniformSet {
   uAmbTop: { value: Color };
   uAmbBot: { value: Color };
   uSpillCol: { value: Color };
+  uLedCol: { value: Color };
+  uLedSpill: { value: number };
   uRimDir: { value: Vector3 };
   uRimCol: { value: Color };
   uHazeCol: { value: Color };
@@ -833,8 +1014,24 @@ export interface CrowdUniformSet {
   uAnimate: { value: number };
 }
 
+/**
+ * The soft knee in the crowd shader asymptotes at **twice** `uCap`, so the cap
+ * is a little under a quarter of the hardwood's scene-linear radiance and the
+ * brightest possible spectator still lands under the near floor. §6.3 states it
+ * flatly and admits no exception: the crowd is never brighter than the hardwood.
+ *
+ * Driven off `LightingSystem.grade.courtLuminance` rather than hard-coded, so
+ * re-exposing the room moves the ceiling with it instead of silently switching
+ * the knee off — which is what a fixed 0.185 had done: it sat *above* the
+ * brightest spectator in the bowl and never engaged at all.
+ */
+export function crowdCapFor(courtLuminance: number): number {
+  return courtLuminance * 0.23;
+}
+
 function makeCrowdMaterial(spec: CrowdBlockSpec, animate: boolean): ShaderMaterial {
   const mat = new ShaderMaterial({
+    defines: { CROWD_HQ: spec.detail >= 2 ? 1 : 0 },
     uniforms: {
       uTime: { value: 0 },
       uPodSize: { value: spec.podSize },
@@ -846,7 +1043,12 @@ function makeCrowdMaterial(spec: CrowdBlockSpec, animate: boolean): ShaderMateri
       // §1.1 is the master criterion: with the hardwood at 95–140 the bowl has
       // to land at 18–45, i.e. 2.5–4 stops down. This number is that ratio.
       uExposure: { value: 4.6 },
-      uPhoneGain: { value: 1.2 },
+      // §6.3 wants each phone to carry a faint bloom, and the post stack only
+      // grabs what is above `grade.bloomThreshold` (1.1 scene-linear). The
+      // screen's albedo luminance is 0.47, so the gain has to clear ~2.4 before
+      // a lit screen is a bloom source rather than a pale sticker. At 3.2 it
+      // lands ~235 sRGB with a few pixels of halo.
+      uPhoneGain: { value: 3.2 },
       uStandRate: { value: 0.16 },
       uHasShin: { value: spec.detail >= 3 ? 1 : 0 },
       // Blocks with no leg geometry at all cannot stand all the way up without
@@ -859,7 +1061,13 @@ function makeCrowdMaterial(spec: CrowdBlockSpec, animate: boolean): ShaderMateri
       uFillCol: { value: new Color(0.13, 0.128, 0.155) },
       uAmbTop: { value: new Color(0.088, 0.102, 0.146) },
       uAmbBot: { value: new Color(0.072, 0.058, 0.044) },
-      uSpillCol: { value: new Color(0.44, 0.37, 0.30) },
+      // Hardwood bounce: amber-warm, per §1.3's 3000–3800 K floor kick.
+      uSpillCol: { value: new Color(0.34, 0.285, 0.22) },
+      // The ribbon and courtside boards, as light rather than as a sticker.
+      // §6.2: a bright board that lights nothing is an emissive quad and looks
+      // like one. Hue is the dominant panel colour on the strip bake.
+      uLedCol: { value: new Color(0.16, 0.30, 0.72) },
+      uLedSpill: { value: 0.55 },
       uRimDir: { value: new Vector3(0, 0.86, 0.51).normalize() },
       uRimCol: { value: new Color(0.52, 0.60, 0.86) },
       uHazeCol: { value: new Color(0.0205, 0.0250, 0.0350) },
@@ -869,7 +1077,8 @@ function makeCrowdMaterial(spec: CrowdBlockSpec, animate: boolean): ShaderMateri
       uRim: { value: 0.055 },
       uSpec: { value: 0.10 },
       uClimbFall: { value: 0.028 },
-      uCap: { value: 0.185 },
+      // Overwritten from the lighting rig in `ArenaSystem.init`; see crowdCapFor.
+      uCap: { value: crowdCapFor(0.19) },
       uAnimate: { value: animate ? 1 : 0 },
     },
     vertexShader: CROWD_VERT,

@@ -7,10 +7,16 @@
  *    stained apron, the centre logo, and a full wear pass (traffic-weighted
  *    scuffs, drag arcs, sweat spots, bench haze, edge dust).
  *  • **mask** — R: signed distance to the painted lane, G: signed distance to
- *    the line work, B: coat roughness field, A: ambient occlusion (panel grid
- *    plus the apron falloff). The two distance fields are what let 2 in lines
- *    stay a crisp 1-pixel edge from a 2.6-texel-wide bake.
+ *    the line work, B: coat roughness field, A: ambient occlusion (the apron
+ *    falloff and the bench haze). The two distance fields are what let 2 in
+ *    lines stay a crisp 1-pixel edge from a 2.6-texel-wide bake.
  *  • **detail** — the tiling maple grain/normal from `courtWood`.
+ *
+ * The joinery — strip seams, butt joints, the panel grid — is *not* here and is
+ * not in the tile either. At 52 texels/m a 2 mm groove is a tenth of a texel;
+ * it is drawn analytically in `Court.ts` off the world position, which is the
+ * only way it stays a real 1 px line at the near floor and fades honestly to
+ * sub-pixel by mid-court.
  *
  * Paint is *not* composited into the albedo. It is mixed in the shader from the
  * distance fields, modulated by the wood's own luminance, so the grain and the
@@ -18,16 +24,26 @@
  * and so a specular streak crossing a sideline never changes shape.
  */
 
-import { COURT, FT } from '../core/Constants';
+import { COURT } from '../core/Constants';
 import { clamp01, fbm2, lerp, makeRng, smoothstep } from '../core/MathX';
 import { drawLines, drawPaintedAreas, makeLayout, type CourtLayout } from './courtPaint';
-import { bakeMapleDetail, type MapleDetail } from './courtWood';
+import { bakeMapleDetail, PANEL_LENGTH, PANEL_WIDTH, type MapleDetail } from './courtWood';
 
 /** Distance fields are stored as 0.5 + d / SDF_RANGE, in texels. */
 export const SDF_RANGE = 24;
-/** Shader maps the roughness channel as base + B * range. */
-export const ROUGH_BASE = 0.09;
-export const ROUGH_RANGE = 0.32;
+/**
+ * Shader maps the roughness channel as base + B * range.
+ *
+ * §2.3 puts a poly-finished floor at 0.06–0.14 in the tight (across-grain) axis.
+ * three.js widens the other axis for us — `alphaT = mix(roughness², 1, anisotropy²)`
+ * — so the *material* roughness is the tight axis and the base has to sit at the
+ * bottom of that band, not in the middle of it. The old 0.09–0.41 field put the
+ * broad axis at 0.39–0.45 against §2.3's 0.30 ceiling, which is why the
+ * highlight was a wide dull smear with no core. Note three floors
+ * `material.roughness` at 0.0525, so anything under that is wasted.
+ */
+export const ROUGH_BASE = 0.055;
+export const ROUGH_RANGE = 0.16;
 /** Centre logo radius, metres. Matched analytically in the shader. */
 export const LOGO_RADIUS = 2.06;
 
@@ -183,10 +199,12 @@ export function bakeCourt(height: number, detailSize: number, logoSize = 512): C
   const aimg = actx.createImageData(W, H);
   const ap = aimg.data;
 
-  // Panel grid: portable floors come apart into ~4 × 8 ft panels, and the
+  // Panel grid: portable floors come apart into ~4 × 7 ft panels, and the
   // panels were sanded and sealed as a batch, so each carries its own tone.
-  const panelX = 8 * FT;
-  const panelZ = 4 * FT;
+  // The cross-court pitch is a whole number of boards (`PANEL_WIDTH`) so the
+  // panel joint lands on a milled seam, which is where it is on a real deck.
+  const panelX = PANEL_LENGTH;
+  const panelZ = PANEL_WIDTH;
 
   for (let j = 0; j < H; j++) {
     const z = (j + 0.5) / ppm - L.totalH * 0.5;
@@ -196,17 +214,20 @@ export function bakeCourt(height: number, detailSize: number, logoSize = 512): C
 
       // Hard maple under amber polyurethane.
       //
-      // Two things fight over what the floor's hue ends up being. The coat is a
-      // bright dielectric interface, so a large, *achromatic* specular term is
-      // laid over the albedo at exactly the grazing angles a broadcast framing
-      // uses; and ACES desaturates as it approaches the shoulder. Both push the
-      // maple toward grey. The base therefore has to be carried well warmer and
-      // more saturated than a photographed swatch of finished maple — HSV
-      // ~32° / 66% / 58% here — so that what survives the coat and the tone
-      // curve is golden-amber with orange in the midtones rather than pine.
-      let r = 0.575;
-      let g = 0.408;
-      let b = 0.228;
+      // §2 opens by saying maple is chosen partly *because it is light and
+      // reflects light back into the arena*. The previous base — HSV 32/66/58 —
+      // was carried dark and saturated on the theory that the coat's achromatic
+      // specular would bleach it back, and that is exactly what the frame did:
+      // wherever a bank streak landed the floor went to a near-white sheet
+      // (178/175/174 measured), and wherever one did not, the near hardwood fell
+      // to 56 — a third of §1.1's 95–140 court band, and dark walnut rather than
+      // maple. The base is now a photographed finished-maple swatch, HSV
+      // ~34° / 44% / 78°, i.e. 0.38 linear reflectance instead of 0.17. The
+      // specular is held down to match (`uSpec` in Court.ts) so the two are not
+      // fighting for the same stops.
+      let r = 0.768;
+      let g = 0.648;
+      let b = 0.515;
 
       // Slow stain drift over metres.
       const drift = fbm2(x * 0.055, z * 0.075, 3, 2, 0.5, 11) - 0.5;
@@ -313,56 +334,56 @@ export function bakeCourt(height: number, detailSize: number, logoSize = 512): C
       const idx = j * W + i;
 
       // --- coat roughness ---
+      // Everything here is a *tight-axis* roughness and therefore lives inside
+      // §2.3's 0.06–0.14 band, with only the apron, the dust line and the
+      // heaviest sole prints allowed past it. §2.3's traffic-lane figure is
+      // "locally rougher by 0.04–0.08", which is the whole width of the band —
+      // so the clean coat has to start at the bottom of it.
       const traffic = sampleTraffic(i, j);
       // Buffed lanes are micro-scuffed and therefore *duller*; the corners and
       // the dead ground behind the basket keep the fresh mirror finish.
-      let rough = 0.11 + traffic * 0.09;
+      let rough = 0.062 + traffic * 0.052;
       const swirl = fbm2(x * 0.42, z * 0.55, 3, 2, 0.55, 23) - 0.5;
-      rough += swirl * 0.05;
+      rough += swirl * 0.026;
       const micro = fbm2(x * 6.5, z * 8.5, 2, 2, 0.5, 77) - 0.5;
-      rough += micro * 0.014;
+      rough += micro * 0.008;
 
       const inCourt = Math.abs(x) <= COURT.halfLength && Math.abs(z) <= COURT.halfWidth;
-      if (!inCourt) rough += 0.075; // apron is walked on in street shoes
+      if (!inCourt) rough += 0.045; // apron is walked on in street shoes
 
       // Dust against the very boundary of the wood.
       const edge = Math.max(
         clamp01((Math.abs(x) - (L.totalW * 0.5 - 0.9)) / 0.9),
         clamp01((Math.abs(z) - (L.totalH * 0.5 - 0.8)) / 0.8),
       );
-      rough += edge * 0.05;
+      rough += edge * 0.032;
 
       // Bench haze — resin, spray and towel lint in front of the seats.
       const bench = Math.exp(-Math.pow((z - (COURT.halfWidth + 0.9)) / 1.1, 2)) *
         Math.exp(-Math.pow(x / 9, 4));
-      rough += bench * 0.05;
+      rough += bench * 0.03;
 
       // Sole-print sheen: discrete patches where shoes have abraded the coat.
       // Albedo-invisible; they only show as highlight modulation.
       rough +=
-        clamp01(fbm2(x * 1.7, z * 2.1, 2, 2, 0.5, 131) - 0.62) * 0.17 * traffic;
+        clamp01(fbm2(x * 1.7, z * 2.1, 2, 2, 0.5, 131) - 0.62) * 0.1 * traffic;
 
       for (const w of wet) {
         const d = Math.hypot(x - w.x, z - w.z);
         if (d < w.r * 3.2) {
           const c = 1 - smoothstep(d / (w.r * 3.2));
-          rough -= 0.055 * c * c;
+          rough -= 0.026 * c * c;
         }
       }
 
       // --- ambient occlusion ---
+      // The panel joint itself is *not* baked here any more. At 52 texels/m a
+      // 1.6-texel seam is a 31 mm smear that the near floor then magnifies
+      // tenfold, which is why it was not discernible at a grazing angle in any
+      // frame; it is drawn analytically in the floor shader alongside the strip
+      // seams and the butt joints, where it stays a real 1 px line at any
+      // distance. What is left here is what genuinely varies over metres.
       let ao = 1;
-      const ux = (x + L.totalW * 0.5) % panelX;
-      const uz = (z + L.totalH * 0.5) % panelZ;
-      const pw = 1.6 / ppm;
-      const panelSeam = Math.max(
-        1 - clamp01(Math.min(ux, panelX - ux) / pw),
-        1 - clamp01(Math.min(uz, panelZ - uz) / pw),
-      );
-      // The panel joint holds a hair more coat, so the grid reads under a
-      // raking reflection even where the occlusion term is invisible.
-      rough += panelSeam * 0.014;
-      ao -= panelSeam * 0.05;
       // The stands and the scorer's table shade the outer apron.
       ao -= edge * 0.3;
       ao -= bench * 0.05;
@@ -416,12 +437,20 @@ function bakeCentreLogo(S: number, rng: () => number): HTMLCanvasElement {
   const m = (v: number) => (v / (LOGO_RADIUS * 2)) * S;
   ctx.translate(R, R);
 
-  // Pigment under amber gloss. Checked against §2.5's 72% HSV ceiling:
-  // navy 68%, gold 68%, brick 70%, cream 16%.
-  const navy = '#22406a';
-  const navyDeep = '#1a3355';
-  const gold = '#b8873a';
-  const brick = '#ad5c33';
+  // Pigment under amber gloss. §2.5's ceiling is 72% HSV saturation and it is
+  // a ceiling on the *frame*, not on the swatch. Two things push a court blue
+  // up on the way out: §8.3's shadow split lifts blue and drops red across the
+  // darkest quartile of the frame, and the vignette cools as it darkens — and
+  // the centre mark sits low and outboard in a FLOOR framing, which is exactly
+  // where both are strongest. A navy mixed at 68% measured 74.9% in the review
+  // capture and 86% once the mark stopped being washed out by a specular
+  // sheet. So the blues are mixed lighter as well as flatter: at 44–46%
+  // saturation and half a stop up they land in the low 60s post-grade with
+  // room for the grade to move underneath them.
+  const navy = '#4d6786';
+  const navyDeep = '#43597a';
+  const gold = '#b28a4c';
+  const brick = '#a86647';
   const cream = '#eadfc6';
 
   // --- field ---------------------------------------------------------------
@@ -556,11 +585,16 @@ function bakeCentreLogo(S: number, rng: () => number): HTMLCanvasElement {
 
   // Bleached pigment — a warm chalky grey, which is what scuffed paint under
   // yellowed varnish goes.
-  arc('source-atop', 560, 0.62, 0.04, 0.17, '#b8ac93');
+  //
+  // Carried at roughly 1.6× the alpha it used to be. §2.5 wants the wear
+  // *legible*, and at 0.04–0.17 over a thousand strokes the mark measured 3.26
+  // high-frequency RMS against 2.64 on the bare wood beside it — i.e. the whole
+  // pass was sitting under the film grain and the logo read as a flat disc.
+  arc('source-atop', 520, 0.62, 0.07, 0.28, '#b8ac93');
   // Rubber transferred off soles: darker, tighter, dead centre.
-  arc('source-atop', 240, 0.45, 0.035, 0.12, '#2a2320');
+  arc('source-atop', 230, 0.45, 0.06, 0.21, '#2a2320');
   // Bare wood, only in the worst of it.
-  arc('destination-out', 230, 0.4, 0.06, 0.3, '#000');
+  arc('destination-out', 210, 0.4, 0.09, 0.42, '#000');
 
   // A couple of long drag scars right across the mark.
   ctx.globalCompositeOperation = 'destination-out';

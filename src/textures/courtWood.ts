@@ -8,9 +8,16 @@
  * whole-court bake can hold. So the court is split in two:
  *
  *   • this tile, repeated across the floor, carries every high-frequency cue
- *     (grain in height *and* tone, seams, joints, knots, medullary rays);
+ *     (grain in height *and* tone, knots, medullary rays, and the *relief* of
+ *     the seams and butt joints);
  *   • `courtBake` carries everything that must not repeat (lines, logo, wear,
- *     traffic gloss, panel grid).
+ *     traffic gloss);
+ *   • the joinery's dark line — strip seams, staggered butt joints and the
+ *     panel grid — is drawn analytically in `Court.ts` off the world position.
+ *     It has to be: a 2.2 mm groove is two of the sixty-four texels this tile
+ *     spends across a board and about half a texel along it, and the near floor
+ *     minifies the tile roughly two to one, so a trilinear tap erased the seams
+ *     and the butt joints never survived the bake at all.
  *
  * The texel budget is spent anisotropically on purpose: grain lines run *along*
  * the board, so all of the detail that matters varies across the board (V), and
@@ -38,6 +45,27 @@ export const TILE_BOARDS = 16;
 /** 16 ft along the grain: long enough for 2–3 butt joints per strip. */
 export const TILE_LENGTH = 16 * FT;
 export const TILE_WIDTH = BOARD_WIDTH * TILE_BOARDS;
+
+/**
+ * Half the width of a milled groove, in metres — the tongue-and-groove joint
+ * between two strips. 2.2 mm total, which is 1.5 px at the FLOOR framing's near
+ * edge and sub-pixel by mid-court, matching §2.1's 1–2 px seam.
+ *
+ * Shared with the floor shader, which draws the seam analytically off the world
+ * coordinate. The relief in this tile has to sit on the same line or the bright
+ * milled lip lands beside the dark groove instead of on its shoulder.
+ */
+export const SEAM_HALF = 0.0011;
+
+/**
+ * Portable-floor panel module. §2.1 calls for ~4 × 7 ft panels; a panel edge is
+ * a strip edge on a real deck, so the cross-court pitch is stated in whole
+ * boards — 22 × 53.98 mm = 1.187 m = 3 ft 10.7 in — and the panel joint then
+ * falls exactly on a milled seam instead of wandering across the boards.
+ */
+export const PANEL_BOARDS = 22;
+export const PANEL_LENGTH = 7 * FT;
+export const PANEL_WIDTH = PANEL_BOARDS * BOARD_WIDTH;
 
 interface BoardSpec {
   seed: number;
@@ -205,29 +233,42 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
       // is glossy enough that an over-deep bevel makes that lip *outrun* the
       // tonal darkening, and the seam inverts into a bright line down the
       // board, which is the opposite of what §2.1 asks for. The relief is
-      // therefore shallow and the seam is carried mostly by tone.
+      // therefore shallow.
+      //
+      // The *tone* of the seam is deliberately light here and the dark line is
+      // drawn analytically in the floor shader instead. A 1.5 mm groove is two
+      // texels out of the sixty-four this tile spends on a board, and the near
+      // floor of a portrait frame minifies the tile about two to one, so a
+      // trilinear tap averaged the seam away exactly where the camera is
+      // closest — the frame came back with no countable boards at all. What
+      // stays here is the milled relief, which is what gives the seam its
+      // specular break; the tone is carried by a coordinate that cannot be
+      // filtered out.
       if (dEdge < 0.0034) {
         const shoulder = 1 - smootherstep(dEdge / 0.0034);
         h -= 0.00013 * shoulder * shoulder;
-        ton -= 0.09 * shoulder;
+        ton -= 0.05 * shoulder;
       }
       if (dEdge < 0.0011) {
         const core = 1 - dEdge / 0.0011;
         h -= 0.0003 * core;
-        ton -= 0.34 * core * core;
+        ton -= 0.13 * core * core;
       }
 
       // --- butt joints ------------------------------------------------------
+      // Same split, and worse: a joint is a feature *along* U, where this tile
+      // spends 4.8 mm on a texel, so a 2 mm joint was sub-texel and never
+      // survived the bake at all. The relief stays; the line is analytic.
       for (const jx of spec.joints) {
         const d = Math.abs(x - jx);
         if (d > 0.004) continue;
         const shoulder = 1 - smootherstep(d / 0.004);
         h -= 0.0001 * shoulder * shoulder;
-        ton -= 0.07 * shoulder;
+        ton -= 0.04 * shoulder;
         if (d < 0.0011) {
           const core = 1 - d / 0.0011;
           h -= 0.00025 * core;
-          ton -= 0.3 * core * core;
+          ton -= 0.12 * core * core;
         }
       }
 

@@ -4,46 +4,71 @@
  * The plot is a real one. NBA arenas light the playing surface to 1500–2000 lux
  * at ~5600 K from two catwalk runs high over the sidelines, aimed steeply down,
  * while the seating bowl is deliberately held **2.5–4 stops under** the floor —
- * that ratio is the single most important number in the frame. Everything here
- * follows from it:
+ * that ratio is the single most important number in the frame.
  *
- *  - **Four steep banks carry ~58% of the floor's light, and they carry it
- *    evenly.** Steep is what keeps the bowl dark for free: at 62–68° elevation
- *    the hardwood takes N·L ≈ 0.92 and a spectator's vertical torso takes 0.33,
- *    which is 1.5 stops before crowd albedo contributes anything. A directional
- *    light also has no distance term and no cone, so every square metre of
- *    hardwood receives exactly the same irradiance from it — which is why the
- *    floor's *brightness* lives here and not in the spot pool.
- *  - **Each bank is its own cascade** (`lightShadows.ts`), on four separate
- *    azimuths, so a standing player should throw one dominant near-vertical
- *    contact shadow plus 2–5 fainter fans. **VERIFIED FALSE IN A CAPTURE, round
- *    2: no cast shadow reaches the floor at all.** three's shadow pass is
- *    issuing zero draws into the maps even though it is called every frame with
- *    three valid shadow lights and three's own frustum test puts 39 casters
- *    inside the primary cascade. The receiving end is provably fine — forcing
- *    `getShadow()` to a constant darkens the hardwood — and three unrelated
- *    shadow implementations fail identically, so the fault is upstream of this
- *    rig. Full evidence and the reproduction are in the `lightShadows.ts`
- *    header. Until that is fixed the frame has no contact shadows and §1.2 and
- *    §9.1 cannot pass; the shadow-side numbers below are intent, not measurement.
- *  - **The filter is PCSS.** Penumbra should grow with the receiver-to-blocker
- *    gap, so a planted sole is a couple of pixels and a raised hand is twenty.
- *    Stock three filters at a constant radius, which is a named tell. Also
- *    unverifiable while the maps come back empty.
- *  - **A pool of overhead spots** adds the last ~6%, and it is deliberately the
+ * ---------------------------------------------------------------------------
+ * ROUND 1 — what changed and why. Two round-2 claims in this header were wrong
+ * and are deleted rather than edited, because both sent the next round the
+ * wrong way.
+ *
+ * 1. "three's shadow pass issues zero draws." It does not. The pass renders;
+ *    the *read* was broken. `BasicShadowMap` binds the shadow depth as a plain
+ *    `sampler2D` over a DEPTH_COMPONENT24 texture, which returns nothing usable
+ *    on this rasteriser, so `getShadow()` was returning exactly 1.0 at every
+ *    fragment. That is why the reviewer measured hardwood under a planted foot
+ *    at 96.12 against 95.53 beside it — a ratio of 1.006, i.e. a multiply by
+ *    one. `lightShadows.ts` is now on the comparison sampler and the isolated
+ *    reproduction is in its header. Balance could never have fixed this.
+ * 2. "Raising the rim from 8.4 m to 17.5 m and cutting it 2.6× fixed the near
+ *    floor sheet." It did not. The round-0 capture measured that block at
+ *    saturation 0.043 over 5.1% of the gameplay frame — *less* chroma than the
+ *    0.09 the note claimed to have repaired. The sheet was never the rim light:
+ *    at 42° elevation on a roughness-0.11 coat that light's half-vector is far
+ *    outside the specular lobe. It was the environment, and specifically the
+ *    fact that three r185 **overrides `material.envMapIntensity` with
+ *    `scene.environmentIntensity`** for every material that has no envMap of its
+ *    own. `Court.ts` asks for 0.17 on the hardwood; this file was handing it
+ *    0.9. See `scene.environmentIntensity` below.
+ * ---------------------------------------------------------------------------
+ *
+ * How the floor's 1.34 of irradiance is spent, and why:
+ *
+ *  - **Four steep banks carry 64% of it**, weighted 0.52 / 0.25 / 0.19 / 0.055
+ *    rather than round 0's near-even 0.54 / 0.31 / 0.222 / 0.18. Even weighting
+ *    across four azimuths is what made players read as ambient-lit: every
+ *    vertical surface faced *something*. One dominant bank plus three fans gives
+ *    a lit side and a shadow side.
+ *  - **Steep is what keeps the bowl dark for free**: at 62–68° elevation the
+ *    hardwood takes N·L ≈ 0.92 and a spectator's vertical torso takes 0.33,
+ *    1.5 stops before crowd albedo contributes anything. A directional light
+ *    also has no distance term and no cone, so every square metre of hardwood
+ *    receives exactly the same irradiance from it.
+ *  - **Three of the four cascade at `high`** (`Quality.shadowCascades` is 3
+ *    while the rig budget is 4 banks), so the shadow-removable share of the
+ *    floor is 60%: a fully occluded point lands at **40% of the adjacent
+ *    floor**, inside §1.2's 25–45%, with the primary's own lobe at 68% and the
+ *    secondary fans at 84% and 90%. The un-shadowable remainder — `top`, the
+ *    rims, the pool, ambient, hemi and IBL — carries 0.48 of the 1.34, because
+ *    every unit of it is a unit no shadow can ever remove; round 0's remainder
+ *    was 42% of a larger total *and* the shadow term was 1.0, so nothing came
+ *    off at all.
+ *  - **How far to concentrate is bounded from the other side by specular**, and
+ *    the first round-1 pass found that bound the hard way. See `BANK_INTENSITY`.
+ *  - **The filter is PCSS over a comparison sampler.** Penumbra grows with the
+ *    receiver-to-blocker gap, so a planted sole is a couple of pixels and a
+ *    raised hand is twenty; verified in an isolated capture at 0.225 occlusion
+ *    with a 16 px contact transition.
+ *  - **A pool of overhead spots** adds the last ~4%, and it is deliberately the
  *    most boring light in the room. Every cone is a 58° half-angle aimed at the
  *    court's long axis with `penumbra = 1`, so its edge lands ~28 m from the aim
  *    point — off the hardwood, off the apron, out of frame — and all that is
- *    left on the floor is the smooth `smoothstep` shoulder. Their sum is one
- *    soft dome that fades toward the sidelines. There is no cone edge anywhere
- *    on the floor, because there is no cone edge within 15 m of the floor.
- *  - **The floor is the warm source, and it is a hemisphere, not a point.**
- *    Amber lands on every downward-facing normal — jaw undersides, shorts hems,
- *    the bottom of the ball — from a `HemisphereLight`, which three evaluates
- *    into irradiance only. That matters: a *punctual* bounce light sitting 0.5 m
- *    over a roughness-0.1 varnish is a specular hazard, and it wrote a visible
- *    hard orange arc across the floor in the round-1 captures (its distance
- *    cutoff sphere cutting the floor plane). Diffuse-only terms cannot do that.
+ *    left on the floor is the smooth `smoothstep` shoulder.
+ *  - **The floor is the warm source, and most of it now comes from the
+ *    environment**, whose lower hemisphere is the hardwood. The
+ *    `HemisphereLight` is kept as a small top-up (0.14, down from 0.62) purely
+ *    so downward normals keep their amber even at `low`, where the environment
+ *    is a 256 px bake. At 0.62 it was double-counting the same bounce and put
+ *    0.18 of flat fill on every vertical surface in the room.
  *  - **The environment is the specular half of the rig.** `envArena.ts` paints
  *    every pod as a rectangle at the same world position the arena hangs it, so
  *    the streak a player sees in the backboard belongs to a fixture that is
@@ -123,16 +148,32 @@ const LEVELS = {
   bowl: 0.04,
   /** LED ribbon peak → ~232 sRGB: bright, headroom for bloom, never clipped. */
   led: 1.7,
-  /** A fixture pod as seen in a reflection — a 200–255 hard specular. */
-  fixture: 1.7,
+  /**
+   * A fixture pod lens as seen in a reflection — the 200–255 hard specular of
+   * §1.4b. Raised from 1.7 because `scene.environmentIntensity` came down from
+   * 0.9 to 0.22 (see `init`), and what the backboard actually sees is the
+   * product of the two: 4.6 × 0.22 = 1.01 against round 0's 1.7 × 0.9 = 1.53.
+   * The reflector-housing halo around the lens went up 3.2× on top of that —
+   * §1.4a's "grid of 4–12 bright quads at 60–120" is that halo population, the
+   * round-0 capture had it an order of magnitude under the band, and a single
+   * bridged catwalk strip (now cut 3.7×) was the only thing legible in the
+   * glass.
+   */
+  fixture: 4.6,
   /**
    * Total irradiance on an up-facing patch of hardwood, summed over the whole
-   * rig. Court radiance is `courtIrradiance * albedo / PI`; the hardwood
-   * measures out around 0.45 albedo, which is what puts `court` where it is.
-   * The pool spots size themselves off this, so their share of the floor stays
-   * a stated fraction instead of a magic candela number.
+   * rig — banks 0.861, rims 0.207, top 0.045, pool 0.067, ambient 0.010, hemi
+   * 0.004, IBL 0.150. Court radiance is `courtIrradiance * albedo / PI`; the
+   * hardwood measures out around 0.45 albedo. The pool spots size themselves
+   * off this, so their share of the floor stays a stated fraction instead of a
+   * magic candela number.
+   *
+   * Round 0 stated 1.32 here while the rig actually summed to about 1.9 once the
+   * environment was integrated, so `POOL_SHARE` was not the share it claimed to
+   * be. Stated honestly now, and the IBL term is a measured integral of the bake
+   * rather than a guess.
    */
-  courtIrradiance: 1.32,
+  courtIrradiance: 1.35,
   /**
    * `renderer.toneMappingExposure`. Owned here and nowhere else.
    */
@@ -148,7 +189,7 @@ const LEVELS = {
  * the pool at roughly a fifth of the floor's light through six narrow cones and
  * the result was readable ellipses.
  */
-const POOL_SHARE = 0.055;
+const POOL_SHARE = 0.050;
 /** Half-angle of a pool cone. At 17.8 m the edge is 28 m out — nowhere near the floor. */
 const POOL_ANGLE = 1.02;
 
@@ -193,28 +234,48 @@ const BANK_DIRS: Vector3[] = [
  * — neutral-to-warm — which, on top of warm maple and warm floor bounce, put the
  * frame's top quintile at R − B = +33 against §8.3's +4..+12 ceiling.
  */
-const BANK_TINTS = [0xeff4ff, 0xfaf8ff, 0xecf2ff, 0xfff5e9];
+const BANK_TINTS = [0xf6f8ff, 0xfaf8ff, 0xecf2ff, 0xfff5e9];
 /**
- * The banks deliberately carry ~58% of the floor's light between them, because
- * that is what makes the shadows read: under a standing player all four are
- * blocked and the core drops to ~42% of the adjacent floor, while a single fan
- * — one bank blocked, three still lit — only drops to ~76%. That is exactly the
- * "one dominant contact shadow plus 2–5 fainter fans" the frame needs (§1.2).
- * Pushing more light into the shadowless fill flattens the contact; pushing less
- * makes the fans read as four hard shadows.
+ * The banks carry ~69% of the floor's light between them, and they carry it
+ * **unevenly**. Round 0 spread it almost flat across four azimuths
+ * (0.54 / 0.31 / 0.222 / 0.18) on the theory that four blocked banks make a
+ * dark core. What that actually bought was a player lit from every side at once:
+ * the reviewer measured the lit edge of the jersey at 1.49:1 against its own
+ * shadow side where §1.2 wants 4:1–8:1, and calls anything under 3:1 flat
+ * ambient — §10's first tell.
  *
- * They also carry it *evenly*: a directional light has no distance term and no
- * cone, so every square metre of hardwood receives exactly the same irradiance
- * from it. That is the whole reason the floor's brightness now lives here rather
- * than in the spot pool.
+ * With one dominant bank the arithmetic is (up-facing floor irradiance, out of
+ * a 1.34 total):
+ *
+ *   all four blocked  →  0.40 of adjacent   (§1.2 wants 0.25–0.45)
+ *   bank0 alone       →  0.68               ← reads as the dominant shadow
+ *   bank1 alone       →  0.84  }
+ *   bank2 alone       →  0.90  }            ← the 2–5 fainter fans
+ *   bank3 alone       →  1.00  }  (never cascades at `high`)
+ *
+ * so the frame still gets a fan, but one lobe is unmistakably the shadow and the
+ * others are hints — which is what a broadcast frame looks like and what §1.2
+ * describes. Bank 3 does not cascade at `high` (three cascades, four banks), so
+ * it is cut to 0.055: an un-shadowable bank is irradiance no contact shadow can
+ * ever remove, and round 0 had 0.18 of exactly that.
+ *
+ * How far to concentrate is bounded from the other side, and the bound is
+ * specular. The first round-1 pass ran 0.92 / 0.26 / 0.19 / 0.075; the occlusion
+ * and the key:fill both landed, but putting 45% of the floor into one lobe made
+ * that lobe's own streak on a mirror-bright coat much hotter — measured in
+ * `shots/lighting-r1`, hardwood *inside* a cast shadow came back at sRGB
+ * saturation 0.44 against 0.14 for lit hardwood 30 px away, so most of what the
+ * shadow removed there was achromatic. Specular does not add across lights the
+ * way diffuse does: at any one pixel you are inside one lobe, so it is peak bank
+ * intensity and not bank *sum* that sets the sheet.
  */
-const BANK_INTENSITY = [0.54, 0.31, 0.222, 0.18];
+const BANK_INTENSITY = [0.52, 0.25, 0.19, 0.055];
 /** Extent, follow, shadow intensity, source half-angle, distance, refresh. */
 const BANK_SHADOW: Array<Omit<CascadeSpec, 'direction'>> = [
   { extent: 6.4, follow: 1.0, intensity: 1.0, sourceAngle: 0.026, distance: 26, refreshInterval: 1 },
-  { extent: 16, follow: 0.85, intensity: 0.9, sourceAngle: 0.042, distance: 30, refreshInterval: 1 },
-  { extent: 34, follow: 0.0, intensity: 0.72, sourceAngle: 0.07, distance: 42, refreshInterval: 15 },
-  { extent: 22, follow: 0.4, intensity: 0.8, sourceAngle: 0.055, distance: 34, refreshInterval: 4 },
+  { extent: 16, follow: 0.85, intensity: 1.0, sourceAngle: 0.042, distance: 30, refreshInterval: 1 },
+  { extent: 34, follow: 0.0, intensity: 0.92, sourceAngle: 0.07, distance: 42, refreshInterval: 15 },
+  { extent: 22, follow: 0.4, intensity: 0.85, sourceAngle: 0.055, distance: 34, refreshInterval: 4 },
 ];
 
 export class LightingSystem implements System {
@@ -316,15 +377,39 @@ export class LightingSystem implements System {
     const rt = this.pmrem.fromEquirectangular(raw);
     this.envTexture = rt.texture;
     scene.environment = rt.texture;
-    // The bake is authored directly in the same scene-linear units as the
-    // analytic rig, so the numbers in `grade` mean something to whoever reads
-    // them. Held a little under 1 all the same: the environment is the *only*
-    // thing supplying the floor's grazing reflection, and at unity the ceiling
-    // and courtside bands came back across the bottom third of a FLOOR frame
-    // hot enough to desaturate the maple to sRGB saturation 0.09. The 10% that
-    // comes off here goes back into the banks above, which are diffuse-even and
-    // cannot streak.
-    scene.environmentIntensity = 0.9;
+    // THE ONE ENVIRONMENT KNOB, and it is not just an attenuation.
+    //
+    // In r185 `WebGLRenderer.setProgram` does this on every draw:
+    //
+    //   if ( isStandard|Lambert|Phong && material.envMap === null &&
+    //        scene.environment !== null )
+    //       envMapIntensity.value = scene.environmentIntensity;
+    //
+    // — it **overwrites** `material.envMapIntensity`. Nothing in this project
+    // assigns its own `envMap`, so this single number is the IBL gain for the
+    // hardwood, the glass, the chrome, the padding and the players alike, and it
+    // silently discarded every per-material figure the other agents set:
+    // `Court.ts` asks for 0.17 on the floor and was being given 0.9, `Hoop.ts`
+    // asks 1.7 for the backboard and was also given 0.9.
+    //
+    // 0.9 was therefore ~5× over on the surface that matters most. Measured on
+    // the round-0 bake, the environment alone was putting 0.49 of irradiance on
+    // an up-facing floor patch and 0.44 on *every vertical surface in the room*
+    // — the flat fill behind §1.2's 1.49:1 key-to-shadow, and, through the
+    // grazing Fresnel on a roughness-0.11 coat, the bleached 194/sat-0.043 sheet
+    // over the near hardwood.
+    //
+    // Since one scalar has to serve every material, the differentiation moves
+    // into the bake instead: `envArena.ts` now runs the sub-horizon and
+    // courtside bands (what the floor reflects) 3–4× down and the fixture
+    // populations (what the glass and chrome reflect) up. At 0.22 the
+    // environment contributes 0.150 to the floor, 0.095 to a vertical surface
+    // and 0.121 to a downward one — a bounce, not a light source. Court.ts still
+    // gets 1.3× more than the 0.17 it asks for; going lower starts costing the
+    // backboard and chrome populations §1.4 requires, and that trade cannot be
+    // resolved from this file — it needs `material.envMap` assigned per
+    // material, which is `Court.ts`'s and `Hoop.ts`'s to do.
+    scene.environmentIntensity = 0.22;
     raw.dispose();
 
     // ---------------------------------------------------- overhead bank spots
@@ -375,15 +460,25 @@ export class LightingSystem implements System {
     // round-1 wash hung *inboard* at 13.5 m and aimed down and out through a 54°
     // cone, which put a pale blue tongue of light on the varnish beside the
     // stanchion. Geometry, not tuning, is what fixes that.
+    //
+    // Round 0 aimed these at (0, 9.2, ±24) with `decay = 1.15`. The aim point is
+    // the cone *axis*, so the brightest thing the wash produced was a band
+    // across the upper bowl, and a near-linear decay meant it barely fell off
+    // getting there. The reviewer measured the result: a featureless blue-grey
+    // band at mean 46.32, sd 3.37, sitting a full stop **brighter** than the
+    // crowd beneath it — the bowl's own gradient upside down, and a §1.1 flat-
+    // field failure on top of it.
+    //
+    // Now aimed low and short, at the first rows, with true inverse-square. At
+    // d = 6 m (front rows) the falloff term is 1/36; at d = 18 m (upper deck) it
+    // is 1/324, so the rake is 9× brighter at the bottom than the top and the
+    // gradient runs the right way.
     const railZ = COURT.halfWidth + COURT.apronZ + 0.6;
     for (const sz of [1, -1] as const) {
-      const washIntensity = 0.62;
-      // Sub-quadratic decay: at true inverse-square a fixture this close to the
-      // front row is 40× brighter there than eight rows up, which reads as a
-      // hot band, not a rake.
-      const wash = new SpotLight(0x9db4da, washIntensity, 34, 0.62, 1.0, 1.15);
-      wash.position.set(0, 2.35, sz * railZ);
-      wash.target.position.set(0, 9.2, sz * 24);
+      const washIntensity = 2.1;
+      const wash = new SpotLight(0x9db4da, washIntensity, 30, 0.66, 1.0, 2);
+      wash.position.set(0, 2.6, sz * railZ);
+      wash.target.position.set(0, 3.6, sz * (railZ + 8));
       wash.castShadow = false;
       this.spots.push(wash);
       this.baseSpotIntensity.push(washIntensity);
@@ -422,43 +517,69 @@ export class LightingSystem implements System {
     this.fill = this.banks[1] ?? this.banks[0];
 
     // -------------------------------------------------------- overhead fill
-    // Straight down, shadowless, neutral. This is the term that lets the floor
-    // be *bright* without being *streaky*. A directional light contributes the
+    // Straight down, shadowless, neutral. A directional light contributes the
     // same irradiance to every square metre of a horizontal plane, and its
     // specular lobe for a broadcast camera sits 45° off the floor normal, which
     // a roughness-0.1 clear coat does not respond to at all. The 3° tilt is so
     // the one place it could theoretically bloom — a shot looking straight down
     // — is not exactly under it.
-    this.top = new DirectionalLight(0xf0f5ff, 0.20);
+    //
+    // Cut to a quarter of round 0 (0.20 → 0.05) and folded into the cascaded
+    // banks. It is shadowless by construction, so every unit of it is a unit
+    // that survives underneath a planted foot: at 0.20 it was carrying 11% of
+    // the floor and setting a hard floor of 11% on how dark any contact shadow
+    // could ever be. It stays in at a whisper because it is the cheapest way to
+    // keep the far apron off the banks' falloff.
+    this.top = new DirectionalLight(0xf0f5ff, 0.05);
     this.top.position.set(1.1, 20, -0.7);
     this.top.castShadow = false;
     this.group.add(this.top, this.top.target);
 
-    // ------------------------------------------------------------- rim light
-    // From behind the far baseline corner, cool. It must *break* where the
-    // silhouette turns away from it — which a real directional does for free and
-    // a Fresnel hack never does.
+    // ------------------------------------------------------------ rim lights
+    // §1.2 makes a rim mandatory: a 2–6 px (RF) hot edge along the top of the
+    // shoulders, the outer arm and the skull at 1.4–2.5× the key-lit surface
+    // beside it, breaking where the silhouette turns away from the back banks.
+    // Round 0 measured the opposite — the shoulder band at 0.55× the jersey
+    // under it and the skull crown *below* the crowd behind it, so the figure
+    // dissolved into the bowl (§10 tell 3).
     //
-    // Raised and dimmed hard from round 1 (8.4 m → 17.5 m, 0.34 → 0.13). This
-    // is the single most expensive light in the frame per unit of intensity,
-    // and the reason is geometric: the camera looks up-court, so the mirror
-    // direction of the near hardwood points up-court too, at roughly the
-    // camera's own elevation. A back light at a *similar* elevation on the
-    // *opposite* azimuth puts the half-vector within a couple of degrees of the
-    // floor normal — N·H ≈ 0.995 — which on a clear coat is the peak of the
-    // specular lobe. At round-1 values it painted a soft white sheet over the
-    // near wood that measured sRGB saturation 0.09: maple with the colour
-    // washed out of it. Every stop of elevation moves the half-vector off the
-    // normal quadratically, so 22° → 42° plus a 2.6× cut takes roughly an order
-    // of magnitude out of that sheet while still raking the shoulders from
-    // behind. The lost floor irradiance goes into `top`, which cannot streak.
-    this.rim = new DirectionalLight(0xc2d6ff, 0.13);
-    this.rim.position.set(-9.5, 17.5, -17);
+    // Two things were wrong and only one of them was the intensity.
+    //
+    // Placement first. Every framing in `CameraSystem` looks up-court toward the
+    // +X basket, so a surface facing the camera has a normal pointing roughly
+    // −X. `rim` sat at (−9.5, 17.5, −17): its light arrives *from* −X, i.e. onto
+    // the camera-facing side. It was a side-fill wearing the name of a rim
+    // light, and only `rimB` — at 0.085, the dimmest light in the rig — was
+    // actually behind anything.
+    //
+    // Both now sit in the +X/−Z quadrant, behind the subject, and are split
+    // ±55° in azimuth about the camera's own axis. That split is doing real
+    // work in two directions at once:
+    //
+    //  - It is what makes the rim *break*. A single back light on the view axis
+    //    draws a continuous outline, which §1.2 calls a Fresnel hack and §10
+    //    calls tell 4. Two lights 110° apart light the back-left and back-right
+    //    of a silhouette and leave the centre-back and the front dark.
+    //  - It keeps them out of the floor's specular lobe. The near hardwood's
+    //    mirror direction points down-court along the view axis at roughly the
+    //    camera's own depression, ~20°. A back light *on* that azimuth puts the
+    //    half-vector within a degree or two of the floor normal whatever its
+    //    elevation, which is the peak of a roughness-0.11 coat's lobe. 55° of
+    //    azimuth puts the half-vector ~15° off the normal, where the GGX term is
+    //    four orders of magnitude down. Elevation is the wrong axis to fix this
+    //    on — that was the round-0 mistake — because moving a back light *up*
+    //    toward the floor normal does not leave the lobe, it walks along it.
+    //
+    // So they go back up to 0.30 / 0.22 (from 0.13 / 0.085) at a 34° elevation
+    // that rakes the top of the shoulders, and the sheet does not come with
+    // them.
+    this.rim = new DirectionalLight(0xc2d6ff, 0.30);
+    this.rim.position.set(16.7, 12.3, 7.4);
     this.rim.castShadow = false;
     this.group.add(this.rim, this.rim.target);
 
-    const rimB = new DirectionalLight(0xd8e4ff, 0.085);
-    rimB.position.set(12.5, 16.5, -14.5);
+    const rimB = new DirectionalLight(0xd8e4ff, 0.22);
+    rimB.position.set(1.3, 12.3, -18.2);
     rimB.castShadow = false;
     this.group.add(rimB, rimB.target);
 
@@ -476,7 +597,18 @@ export class LightingSystem implements System {
     // cuts the floor plane. Both showed up in the capture as an orange arc
     // sweeping out from under the ball-handler. A diffuse-only term buys the
     // same warmth and cannot draw either artefact.
-    this.hemi = new HemisphereLight(0x24314c, 0xffb478, 0.62);
+    //
+    // Cut from 0.62 to 0.14. Its ground colour has a linear luminance of 0.545,
+    // and three weights a HemisphereLight by `0.5 * dot(N, up) + 0.5`, so a
+    // *vertical* normal gets the mean of sky and ground — 0.18 of irradiance at
+    // 0.62, arriving identically on every side of every player in the frame.
+    // That is the definition of flat ambient (§10 tell 1) and it was the single
+    // largest analytic fill in the rig. The environment's lower hemisphere is
+    // the same hardwood bounce evaluated with actual directionality, so this was
+    // also counting the floor twice. It stays in small because at `low` the
+    // environment is a 256 px bake and the amber on a jaw underside (§1.3) is
+    // worth guaranteeing.
+    this.hemi = new HemisphereLight(0x24314c, 0xffb478, 0.14);
     this.hemi.position.set(0, 6, 0);
     this.group.add(this.hemi);
 
@@ -486,7 +618,7 @@ export class LightingSystem implements System {
     // frame. Cool-tinted, so the shadow end of the image is already split
     // against the warm hardwood bounce before the grade touches it. Its real job
     // is the §1.1 floor on the deepest arena shadow: 6–16, never 0.
-    this.ambient = new AmbientLight(0x27364f, 0.34);
+    this.ambient = new AmbientLight(0x27364f, 0.26);
     this.group.add(this.ambient);
 
     // ------------------------------------------------------- practical spots

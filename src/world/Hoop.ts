@@ -66,11 +66,13 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Radius of a single net cord — 3.6 mm of 120-count braided nylon. At the RIM
- * framing (~530 px/m) that lands at ~1.9 px, inside the 1.6–2.4 px window; any
- * thicker and the net starts reading as macramé.
+ * Radius of a single net cord — 3.36 mm of 120-count braided nylon, the thin
+ * end of §5.3's 3–4.5 mm. At the RIM framing (~530 px/m) that is 1.78 px of
+ * geometry, inside the 1.6–2.4 px window with room for what the AA and the
+ * bloom knee add on top of it. Anything fatter and the net reads as macramé,
+ * which is §10 tell #23.
  */
-const CORD_RADIUS = 0.0018;
+const CORD_RADIUS = 0.00168;
 /**
  * Sides on the extruded cord, per tier. Six is plenty for a 2 px strand on a
  * phone; four still reads as round at that size and saves a third of the net.
@@ -173,6 +175,59 @@ function span(g: BufferGeometry, a: Vector3, b: Vector3, axis: 'x' | 'y'): Buffe
   _m4.setPosition((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
   g.applyMatrix4(_m4);
   return g;
+}
+
+/**
+ * Gives a steel surface a readable reflected environment.
+ *
+ * §1.4 is specific about chrome: it must show "a mirrored image of the
+ * environment with recognisable structure — a dark bowl band, a bright ceiling
+ * band, a warm floor band", and "a grey value with a highlight dot" is a named
+ * tell. A stanchion in this arena has nothing to mirror — the bowl around it is
+ * held three stops down and there is no reflection probe on it — so round 1's
+ * stanchion measured mean 14.3 and read as a hole cut in the frame.
+ *
+ * This synthesises the three bands from the reflected ray's elevation. On a
+ * vertical column under a perspective camera the view vector's pitch sweeps
+ * with height, so the reflected ray points *down* near the top of the column
+ * and *up* near its base: the floor bounce lands low, the bowl across the
+ * middle and the ceiling banks along the top edge and the boom, exactly the way
+ * a real polished column bands. It costs about twenty ALU per fragment — no
+ * texture fetch, no extra draw call, no extra bandwidth — which is why it is
+ * not tiered; the geometry that carries it is (see `buildStanchion`).
+ */
+function envBands(mat: MeshPhysicalMaterial, strength: number, key: string): void {
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uBandK = { value: strength };
+    sh.vertexShader = sh.vertexShader
+      .replace('void main() {', 'varying vec3 vBandN;\nvarying vec3 vBandP;\nvoid main() {')
+      .replace(
+        '#include <worldpos_vertex>',
+        `#include <worldpos_vertex>
+         vBandN = normalize( mat3( modelMatrix ) * objectNormal );
+         vBandP = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;`,
+      );
+    sh.fragmentShader = sh.fragmentShader
+      .replace(
+        'void main() {',
+        'uniform float uBandK;\nvarying vec3 vBandN;\nvarying vec3 vBandP;\nvoid main() {',
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+         vec3 bandN = normalize( vBandN );
+         vec3 bandV = normalize( cameraPosition - vBandP );
+         float bandUp = reflect( -bandV, bandN ).y;
+         vec3 bandCol = mix(
+           vec3( 0.44, 0.29, 0.16 ),
+           vec3( 0.030, 0.038, 0.056 ),
+           smoothstep( -0.60, -0.06, bandUp ) );
+         bandCol = mix( bandCol, vec3( 0.95, 1.02, 1.15 ), smoothstep( 0.05, 0.55, bandUp ) );
+         float bandF = 0.24 + 0.76 * pow( 1.0 - clamp( dot( bandN, bandV ), 0.0, 1.0 ), 3.0 );
+         totalEmissiveRadiance += bandCol * uBandK * bandF;`,
+      );
+  };
+  mat.customProgramCacheKey = () => key;
 }
 
 function beamBetween(a: Vector3, b: Vector3, w: number, h: number): BufferGeometry {
@@ -467,9 +522,15 @@ export class Basket {
     // --- padding -----------------------------------------------------------
     // Every board in the league has a vinyl wrap on the bottom edge and up the
     // lower sides. It is stitched, creased and scuffed — not an extruded box.
+    // Base tone: real board wraps are near-black vinyl, but "near-black vinyl"
+    // photographed under 2000 lux of overhead bank is not luminance 10 — §5.1
+    // wants a readable material, and round 1 measured mean 10.4 with sd 2.0,
+    // i.e. an extruded black box, which is the one thing §5.1 says it must not
+    // be. Lifting the albedo to the mid-40s puts the rendered wrap in the
+    // 28–45 band with its seams, bead, stitching and creases above the noise.
     const padTex = bakeVinylPad(1024, 192, {
       label: 'BALLIN',
-      base: [15, 17, 24],
+      base: [106, 110, 124],
       panels: 7,
       // Board padding is plain dark vinyl with a sponsor print; the coloured
       // band belongs on the stanchion, not up here.
@@ -480,7 +541,7 @@ export class Basket {
       roughnessMap: padTex.rough,
       roughness: 1,
       metalness: 0,
-      envMapIntensity: 0.5,
+      envMapIntensity: 1.35,
     });
     const pt = t / 2 + 0.052;
     const bottom = B.bottomHeight;
@@ -537,11 +598,13 @@ export class Basket {
       envMapIntensity: 1.7,
       // A whisper of self-emission. The ring hangs inside a bowl held three
       // stops under the floor, and a saturated red albedo in that little light
-      // tonemaps to maroon — which is what round 1 saw. This is a floor, not a
-      // glow: it costs about six sRGB units in the darkest part of the tube and
-      // keeps the coat reading as bright orange-red rather than oxblood.
-      emissive: 0xd05a22,
-      emissiveIntensity: 0.055,
+      // tonemaps to maroon. This is a floor, not a glow: it costs about five
+      // sRGB units in the darkest part of the tube and keeps the coat reading
+      // as bright orange rather than oxblood. Its hue is pitched yellow of the
+      // target for the same reason the albedo is — stacked on the grade's warm
+      // highlight split it was rotating the ring toward rose.
+      emissive: 0xc8781f,
+      emissiveIntensity: 0.045,
     });
 
     // 12 × 80 keeps the ring's silhouette clean at RIM framing for 1,920 tris;
@@ -644,32 +707,39 @@ export class Basket {
   // -------------------------------------------------------------------------
 
   private buildStanchion(baseX: number, engine: Engine): void {
-    void engine;
     const s = this.side;
     const back = this.boardCentre.x + s * (HOOP.board.thickness / 2 + 0.05);
     const colX = baseX + s * 2.05;
 
     const steel = new MeshPhysicalMaterial({
-      color: 0x565c66,
-      roughness: 0.42,
-      metalness: 0.7,
-      envMapIntensity: 1.4,
+      color: 0x757c88,
+      roughness: 0.38,
+      metalness: 0.68,
+      envMapIntensity: 1.9,
       clearcoat: 0.35,
-      clearcoatRoughness: 0.28,
+      clearcoatRoughness: 0.26,
     });
+    envBands(steel, 0.42, 'ballin-stanchion-steel');
     const chrome = new MeshPhysicalMaterial({
       color: 0xd6dae0,
       roughness: 0.12,
       metalness: 1,
       envMapIntensity: 2.4,
     });
+    envBands(chrome, 0.80, 'ballin-stanchion-chrome');
 
     const p = (x: number, y: number, z = 0) => new Vector3(x, y, z);
+
+    // A four-facet post gives each face one flat normal, so the whole column
+    // reduces to three grey values and the environment banding has nowhere to
+    // sweep. Segment count is the tiered cost here — the band shader itself is
+    // ALU only.
+    const colSeg = engine.quality.playerDetail === 2 ? 14 : 8;
 
     // Column, boom and the gooseneck lower arm.
     const structure: BufferGeometry[] = [
       // Tapered column.
-      span(new CylinderGeometry(0.20, 0.30, 4.05, 4, 1).rotateY(Math.PI / 4),
+      span(new CylinderGeometry(0.20, 0.30, 4.05, colSeg, 1).rotateY(Math.PI / 4),
         p(colX, 0.06), p(colX, 4.11), 'y'),
       // Main boom cantilevering forward over the baseline.
       beamBetween(p(colX, 3.98), p(back + s * 0.06, 3.60), 0.42, 0.30),
@@ -713,8 +783,8 @@ export class Basket {
     // Padded base wrap — the branded block everyone lands on.
     const padTex = bakeVinylPad(1024, 320, {
       label: 'BALLIN',
-      base: [16, 18, 25],
-      accent: [118, 34, 24],
+      base: [100, 104, 118],
+      accent: [150, 52, 34],
       panels: 5,
     });
     const padMat = new MeshStandardMaterial({
@@ -722,7 +792,7 @@ export class Basket {
       roughnessMap: padTex.rough,
       roughness: 1,
       metalness: 0,
-      envMapIntensity: 0.45,
+      envMapIntensity: 1.3,
     });
     const px0 = baseX + s * 0.80;
     const px1 = baseX + s * 2.86;
@@ -860,10 +930,14 @@ export class Basket {
         const t = i / R;
         // Used nets are never white: bright at the top, greying to a soiled
         // hem, with the loops darkened where they saw against the hooks.
-        // §5.3 puts the top at 200–235 and the hem at 180–210, so the tonal
-        // drop across the net is far smaller than it is tempting to make it.
-        const soil = 0.93 - 0.34 * Math.pow(t, 1.6);
-        const choke = 1 - 0.26 * clamp01(1 - t / 0.10);
+        // §5.3 puts the top at 200–235 and the hem at 180–210 — a drop of
+        // roughly 12%, which is far smaller than it is tempting to make it.
+        // Round 1 asked for a 37% drop here and still measured the hem 5.7%
+        // *brighter* than the top, because the Fresnel emissive that has now
+        // been removed was strongest exactly where the cords sit most edge-on,
+        // which is the hem. With that gone this ramp is what you see.
+        const soil = 0.99 - 0.148 * Math.pow(t, 1.25);
+        const choke = 1 - 0.17 * clamp01(1 - t / 0.09);
         const lum = clamp01(soil * choke * tone);
         for (let j = 0; j < K; j++) {
           const vi = base + i * K + j;
@@ -914,18 +988,36 @@ export class Basket {
       roughness: 1,
       metalness: 0,
       // Nylon has a soft, wide sheen rather than a metal-style highlight.
-      sheen: 0.85,
-      sheenRoughness: 0.55,
+      // Sheen is a grazing-angle lobe, so every unit of it lands on the
+      // cord's silhouette and widens the measured strand exactly the way the
+      // old Fresnel emissive did. Nylon does have one; it is kept small and
+      // tight, and the brightness §5.3 asks for comes from albedo, env and the
+      // uniform translucency term instead.
+      sheen: 0.72,
+      sheenRoughness: 0.42,
       sheenColor: 0xfff4e2,
-      envMapIntensity: 0.85,
-      side: DoubleSide,
+      envMapIntensity: 1.9,
+      // The cord tube is a closed hexagonal extrusion: you can only ever see
+      // its outside, so DoubleSide was paying for a second shaded fragment on
+      // 24 interleaved strands for nothing.
+      side: FrontSide,
     });
 
-    // Thin nylon lights up where you see through the edge of a cord. Adding it
-    // as emission rather than alpha keeps the net opaque — no sort order, no
-    // depth fighting between 24 interleaved strands — while still giving the
-    // soft, slightly glowing filament edge that reads as a real net.
-    const edgeGlow: IUniform<number> = { value: 0.42 };
+    // Thin nylon is translucent — light entering one side of a 3.6 mm cord
+    // comes out the other — so the cord never goes as dark as an opaque
+    // dielectric would. Round 1 modelled that as a Fresnel term at 0.42, which
+    // put its entire budget on the silhouette: every cord got a bright fringe
+    // exactly one pixel outside its own geometry, bloom spread it, and the
+    // measured strand widened from a correct 1.65 px to a 4.98 px FWHM rope
+    // (§10 tell #23). It also ran backwards up the tonal ramp, because the hem
+    // is where the cords sit most edge-on.
+    //
+    // A uniform term does the same physical job with none of that: it lifts the
+    // whole cord including the crown a camera actually looks at, it is
+    // modulated by the vertex-colour soil ramp so the ramp survives, and it
+    // adds nothing whatsoever to the silhouette, so a strand is exactly as wide
+    // as CORD_RADIUS says it is. Held well under the bloom threshold.
+    const edgeGlow: IUniform<number> = { value: 0.22 };
     this.netGlow = edgeGlow;
     mat.onBeforeCompile = (sh) => {
       sh.uniforms.uCordGlow = edgeGlow;
@@ -934,15 +1026,21 @@ export class Basket {
         .replace(
           '#include <emissivemap_fragment>',
           `#include <emissivemap_fragment>
-           float cordFres = 1.0 - abs( dot( normalize( normal ), normalize( vViewPosition ) ) );
-           totalEmissiveRadiance += diffuseColor.rgb * pow( cordFres, 2.4 ) * uCordGlow;`,
+           totalEmissiveRadiance += diffuseColor.rgb * uCordGlow;`,
         );
     };
-    mat.customProgramCacheKey = () => 'ballin-netcord';
+    mat.customProgramCacheKey = () => 'ballin-netcord2';
 
     this.netMesh = new Mesh(geo, mat);
-    this.netMesh.castShadow = true;
-    this.netMesh.receiveShadow = true;
+    // The net is a 2,592-triangle mesh whose vertex buffer is rewritten every
+    // frame; re-rasterising it into the shadow map every frame at every tier is
+    // the single most expensive thing this file asks for, and at the sizes a
+    // net's cords occupy the shadow it casts is a faint smudge. So it reads its
+    // budget from Quality: three or more shadow cascades means `high`/`ultra`,
+    // and the net keeps its shadow there and drops it at `low`/`medium`.
+    const netShadows = engine.quality.shadowCascades >= 3;
+    this.netMesh.castShadow = netShadows;
+    this.netMesh.receiveShadow = netShadows;
     this.netMesh.frustumCulled = false;
     this.netMesh.renderOrder = 1;
     this.group.add(this.netMesh);
@@ -952,7 +1050,7 @@ export class Basket {
     this.syncNetGeometry();
   }
 
-  private netGlow: IUniform<number> = { value: 0.42 };
+  private netGlow: IUniform<number> = { value: 0.22 };
 
   // -------------------------------------------------------------------------
   // Simulation
