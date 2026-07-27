@@ -47,6 +47,16 @@ export class GameSystem implements System {
   /** Last whole second announced, so `clockTick` fires once per second. */
   private lastTick = -1;
 
+  /**
+   * Seconds until the ball is released back to the players after a shot
+   * resolves. `launch()` marks the ball as a live shot and the character layer
+   * refuses to take it back while that is true — which is correct during the
+   * flight, but nothing was clearing it, so a possession ended permanently at
+   * the first attempt. The delay exists so the make or the miss plays out
+   * visually before the ball reappears in someone's hands.
+   */
+  private reacquireIn = 0;
+
   init(engine: Engine): void {
     this.ball = engine.get<BallSystem>('ball') ?? null;
 
@@ -67,6 +77,8 @@ export class GameSystem implements System {
       const shot = this.liveShot;
       this.liveShot = null;
       this.phase = 'live';
+      // Long enough for the ball to bounce clear and read as a rebound.
+      this.reacquireIn = 1.1;
       engine.bus.emit('missed', { team: shot.team, shooter: shot.shooter, rimContact: shot.touchedRim });
     });
   }
@@ -85,6 +97,8 @@ export class GameSystem implements System {
 
     this.liveShot = null;
     this.phase = 'live';
+    // Long enough for the net to finish moving before the ball is back in play.
+    this.reacquireIn = 1.5;
 
     engine.bus.emit('scored', {
       points,
@@ -107,6 +121,16 @@ export class GameSystem implements System {
 
   simulate(step: number, engine: Engine): void {
     if (this.phase === 'over') return;
+
+    // Hand the ball back once the shot has finished playing out. Clearing the
+    // owner is what lets the character layer pick it up again; without it a
+    // possession ends for good at the first attempt.
+    if (this.reacquireIn > 0) {
+      this.reacquireIn -= step;
+      if (this.reacquireIn <= 0 && this.ball && this.ball.ballState.owner.kind === 'shot') {
+        this.ball.ballState.owner = { kind: 'free' };
+      }
+    }
 
     this.clock = Math.max(0, this.clock - step);
     this.shotClock = Math.max(0, this.shotClock - step);
