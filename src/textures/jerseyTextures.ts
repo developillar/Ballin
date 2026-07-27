@@ -36,7 +36,16 @@ export interface TeamKit {
   name: string;
   /** Short display name on the back of the jersey. */
   city: string;
-  /** Base cloth. Home whites live at 210–238, never 255. */
+  /**
+   * Base cloth, as **diffuse albedo** — not as the display value we want.
+   *
+   * §3.4 puts a rendered home white at 210–238 and round 0 read that as an
+   * instruction for this field, setting 205/203/197. That is 0.60 linear, well
+   * under the ~0.88 of real white polyester, and once the light was applied the
+   * chest measured 144. An albedo is what the surface does to light, not what
+   * the frame is supposed to show; the display figure is the *output* of this
+   * number, the tone curve and the rig.
+   */
   base: [number, number, number];
   /** Number / name fill. */
   ink: [number, number, number];
@@ -54,22 +63,22 @@ export const TEAM_KITS: readonly [TeamKit, TeamKit] = [
   {
     name: 'home',
     city: 'BALLIN',
-    base: [205, 203, 197],
+    base: [243, 241, 235], // 0.891 linear — white polyester knit
     ink: [26, 38, 72],
     trim: [176, 138, 66],
     accent: [26, 38, 72],
-    shoe: [232, 230, 226],
-    sock: [236, 234, 230],
+    shoe: [240, 238, 233],
+    sock: [246, 245, 241],
   },
   {
     name: 'away',
     city: 'RIVALS',
-    base: [46, 60, 116],
-    ink: [222, 222, 226],
+    base: [58, 74, 138],
+    ink: [230, 230, 234],
     trim: [186, 148, 72],
-    accent: [150, 44, 52],
-    shoe: [34, 36, 44],
-    sock: [40, 46, 74],
+    accent: [158, 50, 58],
+    shoe: [48, 51, 62],
+    sock: [52, 60, 92],
   },
 ];
 
@@ -364,7 +373,10 @@ export class KitBaker {
         let b = bb * (1 + slub * 0.06);
 
         // Waistband: 1.5–3× the cloth thickness, elastic ribbing, own colour.
-        const band = 1 - clamp01((v - 0.05) / 0.03);
+        // The garment maps v = 0..0.28 of this band to the waist→crotch run of
+        // 152 mm, so 0.082 of atlas v is a 45 mm band — a real waistband, with
+        // a hard lower edge rather than the one-ring fade round 0 produced.
+        const band = 1 - clamp01((v - 0.082) / 0.008);
         if (band > 0) {
           const rib = Math.sin(u * W * 0.35) * 0.5 + 0.5;
           r += (ar - r) * band;
@@ -538,8 +550,11 @@ export function bakeShoeStrip(kit: TeamKit, size: number, aniso: number, seed = 
           b = 238 - groove * 124;
         }
       } else if (band === 3) {
-        // Ribbed sock cuff.
-        const rib = Math.sin(u * 80 * Math.PI * 2);
+        // Ribbed sock cuff. The shoe mesh spans u = 0..2 around the ankle, so
+        // this frequency is ribs-per-half-turn: 26 gives ~52 ribs on a 310 mm
+        // circumference, i.e. a 6 mm rib. Round 0 ran 80 — a 2 mm rib, which is
+        // 0.26 px at FLOOR framing and therefore aliasing, not ribbing.
+        const rib = Math.sin(u * 26 * Math.PI * 2);
         h = rib * 1.5;
         rough = 0.82;
         const cuff = 1 - clamp01(Math.abs(t - 0.86) / 0.12);
@@ -554,8 +569,10 @@ export function bakeShoeStrip(kit: TeamKit, size: number, aniso: number, seed = 
         b = sb * 0.55;
         rough = 0.72;
         h = (fbm2(u * 60, t * 60, 3, 2, 0.5, seed + 6) - 0.5) * 0.8;
-        const cordA = 1 - clamp01(Math.abs(((u * 5 + t * 3.2) % 1) - 0.5) / 0.09);
-        const cordB = 1 - clamp01(Math.abs(((u * 5 - t * 3.2 + 1) % 1) - 0.5) / 0.09);
+        // Four crossings over the ~60 mm instep the lace band covers → 2–5 px
+        // strokes at FLOOR framing, which is what §3.6 asks to be able to see.
+        const cordA = 1 - clamp01(Math.abs(((u * 4.2 + t * 3.2) % 1) - 0.5) / 0.11);
+        const cordB = 1 - clamp01(Math.abs(((u * 4.2 - t * 3.2 + 1) % 1) - 0.5) / 0.11);
         const lace = Math.max(cordA, cordB);
         if (lace > 0) {
           const twist = Math.sin((u * 60 + t * 40) * Math.PI * 2) * 0.5 + 0.5;

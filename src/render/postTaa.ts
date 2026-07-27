@@ -13,10 +13,19 @@
  *  - **Reprojection through the previous frame's view-projection**, using the
  *    *closest* depth in a 3×3 neighbourhood so a silhouette samples the history
  *    of the object rather than the background sliding behind it.
- *  - **Variance clipping in YCoCg.** The history is clipped — not clamped —
- *    toward the current colour against an AABB built from the neighbourhood's
- *    mean and standard deviation. Clamping per axis is what leaves the coloured
- *    ghost trails that make people turn TAA off.
+ *  - **Variance clipping in YCoCg, widened on still pixels.** The history is
+ *    clipped — not clamped — toward the current colour against an AABB built
+ *    from the neighbourhood's mean and standard deviation. Clamping per axis is
+ *    what leaves the coloured ghost trails that make people turn TAA off. The
+ *    *width* of that box is the accumulation's real limit: on a static
+ *    high-frequency region the 3×3 sigma is large, the history is legitimately
+ *    outside a 1.1-sigma box on most frames, and clipping it back every frame
+ *    discards exactly the sub-pixel detail the jitter went to gather. Wide when
+ *    still, tight when moving.
+ *  - **A Catmull-Rom history fetch.** A bilinear resample applied once per
+ *    frame at a 0.9 feedback weight is a permanent low-pass, and it is the
+ *    quiet reason TAA stacks deliver several times the blur they are configured
+ *    for.
  *  - **Tone-mapped accumulation.** Blending raw HDR lets one 1.7-radiance LED
  *    pixel dominate eight frames of history and flicker. Weighting by
  *    1/(1+luma) before the mix and undoing it after is Karis's fix and it is
@@ -62,9 +71,50 @@ uniform vec2 uTexel;
 uniform mat4 uInvViewProj;
 uniform mat4 uPrevViewProj;
 uniform float uFeedback;
-uniform float uVarianceClip;
+uniform float uClipStill;
+uniform float uClipMoving;
 
 ${POST_COMMON}
+
+/**
+ * Catmull-Rom history fetch, the 5-tap bilinear-assisted form.
+ *
+ * This is the single largest source of softness in a naive TAA and it is easy
+ * to miss because nothing in the code looks like a blur: the history is
+ * resampled with a bilinear filter *every frame*, and a bilinear filter applied
+ * n times in a row is an n-fold box convolution. At a 0.92 feedback weight that
+ * is a permanent low-pass on everything the camera is not moving relative to,
+ * and it is what makes a post stack deliver three times the blur it is
+ * configured for. Catmull-Rom has negative lobes, so repeated application does
+ * not accumulate width.
+ */
+vec3 sampleHistory(vec2 uv) {
+  vec2 texSize = 1.0 / uTexel;
+  vec2 samplePos = uv * texSize;
+  vec2 texPos1 = floor(samplePos - 0.5) + 0.5;
+  vec2 f = samplePos - texPos1;
+
+  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  vec2 w3 = f * f * (-0.5 + 0.5 * f);
+
+  vec2 w12 = w1 + w2;
+  vec2 offset12 = w2 / max(w12, vec2(1e-5));
+
+  vec2 texPos0 = (texPos1 - 1.0) * uTexel;
+  vec2 texPos3 = (texPos1 + 2.0) * uTexel;
+  vec2 texPos12 = (texPos1 + offset12) * uTexel;
+
+  vec3 result = texture2D(tHistory, vec2(texPos12.x, texPos0.y)).rgb * w12.x * w0.y;
+  result += texture2D(tHistory, vec2(texPos0.x, texPos12.y)).rgb * w0.x * w12.y;
+  result += texture2D(tHistory, texPos12).rgb * w12.x * w12.y;
+  result += texture2D(tHistory, vec2(texPos3.x, texPos12.y)).rgb * w3.x * w12.y;
+  result += texture2D(tHistory, vec2(texPos12.x, texPos3.y)).rgb * w12.x * w3.y;
+  // The negative lobes can ring below zero on a hard edge; the buffer is HDR
+  // and a negative radiance would survive into the next frame's history.
+  return max(result, vec3(0.0));
+}
 
 vec3 rgbToYCoCg(vec3 c) {
   return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
@@ -115,6 +165,13 @@ void main() {
     return;
   }
 
+  // How far the reprojection moved, in pixels. Drives both the clip width and
+  // the feedback weight below — a still pixel wants a long average and a loose
+  // clamp, a moving one wants neither.
+  float speed = length((vUv - prevUv) / uTexel);
+  float moving = clamp(speed / 6.0, 0.0, 1.0);
+  float clipWidth = mix(uClipStill, uClipMoving, moving);
+
   // Neighbourhood statistics of the current frame, in tone-mapped YCoCg.
   vec3 m1 = vec3(0.0);
   vec3 m2 = vec3(0.0);
@@ -131,15 +188,18 @@ void main() {
   }
   vec3 mean = m1 / 9.0;
   vec3 sigma = sqrt(max(vec3(0.0), m2 / 9.0 - mean * mean));
-  vec3 lo = max(nmin, mean - sigma * uVarianceClip);
-  vec3 hi = min(nmax, mean + sigma * uVarianceClip);
+  // On a still pixel the neighbourhood min/max is itself an aliasing estimate,
+  // so intersecting with it re-imposes the tight clamp the width just relaxed.
+  // Widen the hard bound with the soft one.
+  vec3 slack = (nmax - nmin) * 0.25 * max(0.0, clipWidth - 1.0);
+  vec3 lo = max(nmin - slack, mean - sigma * clipWidth);
+  vec3 hi = min(nmax + slack, mean + sigma * clipWidth);
 
-  vec3 history = tonemapWeight(texture2D(tHistory, prevUv).rgb);
+  vec3 history = tonemapWeight(sampleHistory(prevUv));
   vec3 clipped = yCoCgToRgb(clipToAABB(lo, hi, rgbToYCoCg(history)));
 
   // Fast camera motion means reprojection lands further from the truth and the
   // 3x3 clamp has less to work with, so lean on the current frame instead.
-  float speed = length((vUv - prevUv) / uTexel);
   float feedback = uFeedback * mix(1.0, 0.28, clamp(speed / 20.0, 0.0, 1.0));
 
   vec3 cur = tonemapWeight(current);
@@ -203,6 +263,7 @@ export function makeTaaPass(): ScreenPass {
     uInvViewProj: { value: new Matrix4() },
     uPrevViewProj: { value: new Matrix4() },
     uFeedback: { value: 0 },
-    uVarianceClip: { value: 1.1 },
+    uClipStill: { value: 1.6 },
+    uClipMoving: { value: 1.0 },
   });
 }

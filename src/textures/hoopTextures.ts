@@ -97,7 +97,10 @@ export function bakeNetCord(size = 64): { map: CanvasTexture; rough: CanvasTextu
       ai.data[o + 3] = 255;
 
       // The valleys between plies trap light and read rougher than the crowns.
-      const rough = clamp01(0.40 + 0.30 * (1 - ply) + 0.09 * (fuzz - 0.5));
+      // Smoother than round 1: a tighter lobe puts more light on the crown of
+      // the cord — the part facing the camera — where §5.3 measures it, rather
+      // than smearing it round to the silhouette where it widens the strand.
+      const rough = clamp01(0.27 + 0.26 * (1 - ply) + 0.09 * (fuzz - 0.5));
       const g = rough * 255;
       ri.data[o] = g;
       ri.data[o + 1] = g;
@@ -171,7 +174,7 @@ export function bakeRimMaps(
       // frame, never in the texture viewer.
       const peel = fbm2(u * 220, v * 34, 3, 2.1, 0.55, 5);
       let r = 214 + (peel - 0.5) * 22;
-      let g = 120 + (peel - 0.5) * 16;
+      let g = 126 + (peel - 0.5) * 16;
       let b = 36 + (peel - 0.5) * 8;
       // The *inner* face stays cleaner and reads a shade deeper. This used to
       // darken v ≈ 0.25, which is the underside — and the underside is the one
@@ -491,11 +494,11 @@ export function bakeBackboardMaps(
         // ceiling of 0.74 transmission falling to 0.38 — the crowd behind the
         // pane came out 36% dark and three times flatter than the crowd beside
         // it, and no amount of lighting recovers that. §5.1 asks for 0.88–0.94,
-        // so the base is a = 0.059 (cov 15/255) climbing to a ≈ 0.12 at the
+        // so the base is a = 0.067 (cov 17/255) climbing to a ≈ 0.13 at the
         // perimeter where the sight line crosses more glass. The board's
         // *darkness* has to come from the bowl behind it being dark, which it
         // is; the pane's job is only to tint and very slightly dim.
-        let cov = 15 + rim * rim * 15 + grease * 3 + smear * 2;
+        let cov = 17 + rim * rim * 16 + grease * 3 + smear * 2;
         let gr = GLASS_R * (1 - rim * 0.45);
         let gg = GLASS_G * (1 + rim * 0.42);
         let gb = GLASS_B * (1 - rim * 0.10);
@@ -571,13 +574,15 @@ export function bakeGlassReflection(
   const banks: { x: number; y: number; rx: number; ry: number; amp: number; rot: number }[] = [];
   // Widths are set so the 60-luminance footprints do NOT merge — §1.4 asks for
   // *discrete* quads and three touching ones read as one grey wash. The lower
-  // two rows keep to the flanks: the shooter's square lives at x 0.33–0.67,
-  // y 0.43–0.86, and a bank quad landing on it drowns the paint.
+  // two rows keep off the shooter's square (x 0.33–0.67, y 0.43–0.86; a bank
+  // quad landing on it drowns the paint) and off the pane's left margin, which
+  // is where §5.1's transmission is measured: a reflection sitting on the
+  // sample area reads as glass that transmits more than 100%.
   const rows = [
     { y: 0.118, xs: [0.190, 0.500, 0.810], rx: 0.126, ry: 0.078, amp: 112 },
     { y: 0.312, xs: [0.225, 0.520, 0.808], rx: 0.122, ry: 0.070, amp: 102 },
-    { y: 0.545, xs: [0.175, 0.822], rx: 0.112, ry: 0.062, amp: 86 },
-    { y: 0.748, xs: [0.165, 0.832], rx: 0.104, ry: 0.055, amp: 72 },
+    { y: 0.545, xs: [0.268, 0.822], rx: 0.112, ry: 0.062, amp: 86 },
+    { y: 0.748, xs: [0.258, 0.832], rx: 0.104, ry: 0.055, amp: 72 },
   ];
   for (let ri = 0; ri < rows.length; ri++) {
     const r = rows[ri];
@@ -710,6 +715,8 @@ export interface PadOpts {
   accent?: [number, number, number];
   /** Seams per tile along U. */
   panels?: number;
+  /** Padded rolls across V — 1 for a single tube, 2+ for a tall wrap. */
+  rolls?: number;
   stripe?: boolean;
 }
 
@@ -729,6 +736,7 @@ export function bakeVinylPad(
   const base = opts.base ?? [17, 19, 26];
   const accent = opts.accent ?? [186, 58, 32];
   const panels = opts.panels ?? 4;
+  const rolls = opts.rolls ?? 1;
 
   const mc = surface(W, H);
   const rc = surface(W, H);
@@ -741,81 +749,69 @@ export function bakeVinylPad(
       const u = x / W;
       const o = (y * W + x) * 4;
 
-      // Pebbled vinyl grain.
+      // Everything here modulates the base *multiplicatively*. Round 1 added
+      // fixed sRGB offsets, which meant that lifting the base out of the black
+      // it was measured at (mean 10.4, sd 2.0 — an extruded box, the one thing
+      // §5.1 says padding must not be) diluted every detail in proportion. As
+      // ratios the seams, bead, stitching and creases hold their contrast at
+      // any exposure the lighting rig ends up at.
       const grain = fbm2(x * 0.42, y * 0.42, 4, 2.1, 0.52, 5);
-      // Slow creasing from being kicked, leaned on and stacked in a truck.
       const crease = ridged2(u * 7, v * 3.4, 3, 88);
       const soft = fbm2(u * 5, v * 2.5, 3, 2, 0.5, 140);
 
-      // §5.1 says this must not be a perfectly clean extruded box, and round 1
-      // measured it at sd 2.0 over a 200 px window — a black bar. All the
-      // amplitudes below are roughly doubled from round 1 so the vinyl still
-      // reads at a 3 m viewing distance, and the crease term now moves albedo
-      // as well as roughness (a crease in vinyl catches a highlight on one lip
-      // and shades on the other; roughness alone is invisible in a dark bowl).
-      let r = base[0] + (grain - 0.5) * 22 + (soft - 0.5) * 17;
-      let g = base[1] + (grain - 0.5) * 22 + (soft - 0.5) * 17;
-      let b = base[2] + (grain - 0.5) * 24 + (soft - 0.5) * 20;
-      const fold = (crease - 0.5) * 26;
-      r += fold;
-      g += fold;
-      b += fold * 1.1;
+      // The wrap is a padded tube, not a plank: it turns away from the light
+      // top and bottom. This single term is most of what stops the pad reading
+      // as a flat extruded box, and it is what §5.1 means by "a slightly
+      // compressed/creased profile".
+      const roll = 0.5 + 0.5 * Math.cos((v * rolls - 0.26) * Math.PI * 2);
+      let shade = 0.62 + 0.62 * roll;
+      shade *= 1 + (grain - 0.5) * 0.46 + (soft - 0.5) * 0.34 + (crease - 0.5) * 0.40;
+
+      let rough = 0.62 + (grain - 0.5) * 0.16 + crease * 0.09 - roll * 0.06;
+
+      // Welded panel seams: a shaded valley with a lit bead on its far lip, so
+      // the seam survives the mip chain as a light/dark pair rather than
+      // averaging away the way a lone dark line does.
+      const seam = Math.abs((u * panels) % 1 - 0.5) * 2; // 0 at seam
+      const seamPx = seam * (W / (panels * 2));
+      const seamK = clamp01(1 - seamPx / 5);
+      shade *= 1 - seamK * 0.42;
+      rough -= seamK * 0.24;
+      const bead = clamp01(1 - Math.abs(seamPx - 6.5) / 3.0);
+      shade *= 1 + bead * 0.40;
+      rough -= bead * 0.10;
+      // Saddle stitching: a run of dashes flanking each seam. The dash period
+      // is deliberately coarse — this texture is minified 2–3x on screen and an
+      // 11 px dash simply mipped away in round 1.
+      const stitchDist = Math.abs(seamPx - 11);
+      if (stitchDist < 2.4) {
+        const k = (1 - stitchDist / 2.4) * ((y % 24) < 14 ? 1 : 0);
+        shade *= 1 + 0.95 * k;
+        rough -= 0.16 * k;
+      }
+      // Binding tape along the top and bottom edges of the wrap.
+      const bind = Math.max(clamp01(1 - v / 0.05), clamp01(1 - (1 - v) / 0.05));
+      shade *= 1 + bind * 0.45;
+      rough -= bind * 0.14;
+      // Scuffs low down where shoes and chairs hit it.
+      const scuff =
+        clamp01((fbm2(x * 0.06, y * 0.16, 4, 2, 0.5, 303) - 0.52) * 5) *
+        clamp01((v - 0.5) / 0.4);
+      shade *= 1 + scuff * 0.75;
+      rough += scuff * 0.16;
+
+      let r = base[0] * shade;
+      let g = base[1] * shade;
+      let b = base[2] * shade;
 
       // A brand stripe across the middle of the wrap.
       if (opts.stripe !== false) {
         const band = clamp01(1 - Math.abs(v - 0.5) / 0.155);
         const edge = smoothstep(clamp01(band * 6));
-        r += (accent[0] - r) * edge;
-        g += (accent[1] - g) * edge;
-        b += (accent[2] - b) * edge;
+        r += (accent[0] * shade - r) * edge;
+        g += (accent[1] * shade - g) * edge;
+        b += (accent[2] * shade - b) * edge;
       }
-
-      let rough = 0.62 + (grain - 0.5) * 0.16 + crease * 0.09;
-
-      // Welded panel seams: a shaded valley with a lit bead on its far lip, so
-      // the seam survives the mip chain as a light/dark pair rather than
-      // averaging away to nothing the way a single dark line does.
-      const seam = Math.abs((u * panels) % 1 - 0.5) * 2; // 0 at seam
-      const seamPx = seam * (W / (panels * 2));
-      const seamK = clamp01(1 - seamPx / 5);
-      if (seamK > 0) {
-        r -= seamK * 17;
-        g -= seamK * 17;
-        b -= seamK * 16;
-        rough -= seamK * 0.24;
-      }
-      const bead = clamp01(1 - Math.abs(seamPx - 6.5) / 3.0);
-      r += bead * 15;
-      g += bead * 14;
-      b += bead * 13;
-      rough -= bead * 0.10;
-      // Saddle stitching: a run of dashes flanking each seam. The dash period
-      // is deliberately coarse — this texture is minified 2–3× on screen, and
-      // an 11 px dash simply mipped away in round 1.
-      const stitchDist = Math.abs(seamPx - 11);
-      if (stitchDist < 2.4) {
-        const dash = (y % 24) < 14 ? 1 : 0;
-        if (dash) {
-          const k = 1 - stitchDist / 2.4;
-          r += 56 * k;
-          g += 53 * k;
-          b += 48 * k;
-          rough -= 0.16 * k;
-        }
-      }
-      // Horizontal top and bottom binding tape.
-      const bind = Math.max(clamp01(1 - v / 0.05), clamp01(1 - (1 - v) / 0.05));
-      r += bind * 24;
-      g += bind * 22;
-      b += bind * 20;
-      rough -= bind * 0.14;
-
-      // Scuffs low down where shoes and chairs hit it.
-      const scuff = clamp01((fbm2(x * 0.06, y * 0.16, 4, 2, 0.5, 303) - 0.52) * 5) * clamp01((v - 0.5) / 0.4);
-      r += scuff * 44;
-      g += scuff * 42;
-      b += scuff * 39;
-      rough += scuff * 0.16;
 
       mi.data[o] = clamp01(r / 255) * 255;
       mi.data[o + 1] = clamp01(g / 255) * 255;
@@ -853,7 +849,6 @@ export function bakeVinylPad(
     rc.restore();
   }
 
-  void hash2;
   return {
     map: finish(mc, { srgb: true, wrapT: ClampToEdgeWrapping }),
     rough: finish(rc, { wrapT: ClampToEdgeWrapping }),

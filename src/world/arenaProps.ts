@@ -289,16 +289,34 @@ export function buildCourtside(
   }
 
   // Monitors, mics and the officials behind it.
+  //
+  // The screens matter more than their size suggests: they are 20 px of the
+  // brightest cool value in the courtside band, so they are what the eye lands
+  // on after the boards. A single flat pale-blue rectangle at full width reads
+  // as a sticky note stuck to the table — round 1 measured them at 191–214 sRGB,
+  // a hard-edged plateau with no interior structure. They get a bezel, a screen
+  // inset inside it, a per-station colour and about half the emission.
+  const SCREEN = [0x2f6bd6, 0x8fb4e8, 0x2a8f74, 0x6f7cc4, 0xd8a24a];
   for (let i = -3; i <= 3; i++) {
     const x = i * 1.2 + randRange(rng, -0.06, 0.06);
-    b.steel.set('color', ...rgb(0x1a1e26));
+    b.steel.set('color', ...rgb(0x14171d));
     b.steel.box(x, tableH + 0.19, tz - 0.12, 0.17, 0.13, 0.02, { faces: FACE_SIDES, shearZ: -0.12 });
-    b.emissive.set('color', ...rgb(0x63a8ff, 0.55 + rng() * 0.5));
+    // Screen, inset inside the bezel.
+    b.emissive.set('color', ...rgb(SCREEN[(i + 3) % SCREEN.length], 0.20 + rng() * 0.16));
     b.emissive.quad(
-      x - 0.15, tableH + 0.07, tz - 0.135,
-      x + 0.15, tableH + 0.07, tz - 0.135,
-      x + 0.15, tableH + 0.3, tz - 0.16,
-      x - 0.15, tableH + 0.3, tz - 0.16,
+      x - 0.128, tableH + 0.095, tz - 0.137,
+      x + 0.128, tableH + 0.095, tz - 0.137,
+      x + 0.128, tableH + 0.276, tz - 0.158,
+      x - 0.128, tableH + 0.276, tz - 0.158,
+    );
+    // A brighter strip of "content" across it, so the face is not one value.
+    // Sits 1 mm court-side of the screen plane, not behind it.
+    b.emissive.set('color', ...rgb(0xdfe8ff, 0.14 + rng() * 0.12));
+    b.emissive.quad(
+      x - 0.128, tableH + 0.108, tz - 0.1375,
+      x + 0.128, tableH + 0.108, tz - 0.1375,
+      x + 0.128, tableH + 0.148, tz - 0.1421,
+      x - 0.128, tableH + 0.148, tz - 0.1421,
     );
     if (i !== 0) {
       seatedFigure(b.matte, x, tz - 0.55, 0, i % 2 === 0 ? 0x0e1220 : 0x1a1f2c, rng, 1.0);
@@ -421,6 +439,63 @@ export function buildCourtside(
     b.satin.box(x, 0.52, 0, 0.09, 0.52, 7.6, { faces: FACE_SIDES | FACE_TOP });
     b.satin.set('color', ...rgb(seatColour, 0.4));
     b.satin.box(x - sx * 0.1, 0.75, 0, 0.02, 0.14, 7.6, { faces: FACE_SIDES | FACE_TOP });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Baseline apron floor: cable runs, kit and towels
+  // ---------------------------------------------------------------------------
+  //
+  // The strip of apron between the camera and the baseline photographers is the
+  // largest unbroken surface in a RIM framing, and empty it samples to a single
+  // value — `analyze.mjs` found its flattest 159 px window there at sd 1.9–2.5
+  // against §1.1's 6. It is also, in a real building, the busiest square metre
+  // of floor in the arena: taped cable snakes off the camera positions, kit
+  // bags, spare towels. §6.4 asks for the furniture; §1.1 needs the variance.
+
+  for (const sx of [-1, 1] as const) {
+    const bx = sx * (APRON_HX - 0.2);
+    // Taped cable runs along the baseline, kinked so they do not read as a rule.
+    for (let k = 0; k < 7; k++) {
+      const z = -3.4 + k * 1.15 + randRange(rng, -0.2, 0.2);
+      const w = randRange(rng, 0.45, 1.05);
+      b.matte.set('color', ...rgb(0x15171c, 0.6 + rng() * 0.7));
+      b.matte.box(bx - sx * randRange(rng, 0.05, 0.5), 0.011, z, 0.022, 0.011, w, {
+        rotY: randRange(rng, -0.22, 0.22),
+        faces: FACE_SIDES | FACE_TOP,
+      });
+      if (rng() < 0.55) {
+        b.matte.set('color', ...rgb(0x23262d, 0.7 + rng() * 0.6));
+        b.matte.box(bx - sx * randRange(rng, 0.6, 1.5), 0.009, z + randRange(rng, -0.4, 0.4), 0.019, 0.009, w * 0.8, {
+          rotY: randRange(rng, -0.9, 0.9),
+          faces: FACE_SIDES | FACE_TOP,
+        });
+      }
+    }
+    // Gaffer-tape crosses where the runs are dressed down.
+    for (let k = 0; k < 5; k++) {
+      b.matte.set('color', ...rgb(0x2c3038, 0.8 + rng() * 0.5));
+      b.matte.box(
+        bx - sx * randRange(rng, 0.1, 1.3), 0.006, randRange(rng, -3.6, 3.6),
+        0.055, 0.006, 0.055, { rotY: randRange(rng, -0.8, 0.8), faces: FACE_TOP },
+      );
+    }
+    // Kit bags and a towel or two between the shooting positions.
+    for (let k = 0; k < 4; k++) {
+      const z = -2.8 + k * 1.9 + randRange(rng, -0.35, 0.35);
+      if (Math.abs(z) < 1.5) continue;
+      b.matte.set('color', ...rgb(rng() < 0.5 ? 0x1b1f27 : 0x2a221c, 0.7 + rng() * 0.5));
+      b.matte.box(bx - sx * randRange(rng, 0.35, 0.95), 0.085, z, 0.20, 0.085, 0.14, {
+        rotY: randRange(rng, -0.7, 0.7),
+        faces: FACE_SIDES | FACE_TOP,
+      });
+      if (rng() < 0.6) {
+        b.matte.set('color', ...rgb(0xcfd4dc, 0.32 + rng() * 0.22));
+        b.matte.box(bx - sx * randRange(rng, 0.5, 1.4), 0.022, z + randRange(rng, -0.5, 0.5), 0.13, 0.022, 0.10, {
+          rotY: randRange(rng, -1.2, 1.2),
+          faces: FACE_SIDES | FACE_TOP,
+        });
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

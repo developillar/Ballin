@@ -65,7 +65,12 @@ void main() {
   float radius = abs(cocC);
 
   vec3 centre = texture2D(tColor, vUv).rgb;
-  if (radius < 0.75) {
+  // Anything under a full pixel of *radius* — two of diameter — is handed back
+  // bit-exact. The focus subject is the thing the player is looking at and §7.4
+  // is explicit that it and the rim stay sharp; a gather that starts at three
+  // quarters of a pixel was spending a visible amount of edge width on depths
+  // that are, by the lens model, in focus.
+  if (radius < 1.1) {
     gl_FragColor = vec4(centre, 1.0);
     return;
   }
@@ -103,7 +108,7 @@ void main() {
   }
 
   vec3 blurred = acc / max(total, 1e-4);
-  gl_FragColor = vec4(mix(centre, blurred, smoothstep(0.75, 1.8, radius)), 1.0);
+  gl_FragColor = vec4(mix(centre, blurred, smoothstep(1.1, 3.0, radius)), 1.0);
 }
 `;
 

@@ -27,6 +27,14 @@
  *    pebble fades into a roughness constant as the ball recedes instead of
  *    aliasing or vanishing.
  *
+ *    The channels are *not* filtered that way. A 6 mm rib crossing a 6 mm texel
+ *    lands split across two of them, and a box filter answers that by making it
+ *    both wider and shallower — which is exactly how the round-0 ball lost its
+ *    ribs, from 37% of adjacent leather at macro to 61–72% at the distance the
+ *    ball spends most of its screen time. So the cover is baked as two layers,
+ *    leather and rib coverage, and the rib is rebuilt at every mip level from a
+ *    contrast-restored coverage rather than carried down as pixels.
+ *
  * Owned by the ball agent.
  */
 
@@ -40,7 +48,7 @@ import {
   SRGBColorSpace,
   Uint16BufferAttribute,
 } from 'three';
-import { clamp01, makeRng, smoothstep, smootherstep, valueNoise2 } from '../core/MathX';
+import { clamp01, lerp, makeRng, smoothstep, smootherstep, valueNoise2 } from '../core/MathX';
 
 // ---------------------------------------------------------------------------
 // Cube-sphere basis
@@ -193,6 +201,43 @@ function sphereNoise(seed: number, terms: number, fLo: number, fHi: number) {
   };
 }
 
+/**
+ * 3D value noise on the surface direction. `valueNoise2` is face-local, so a
+ * field built on it is discontinuous across a cube edge; at the amplitudes the
+ * leather grain needs that would show as a six-panel patchwork. This is the
+ * same trilinear value noise evaluated on the *direction*, so it is continuous
+ * everywhere on the sphere, and it is integer hashing rather than a sum of
+ * plane waves, so it stays affordable at wavelengths measured in millimetres.
+ */
+function hash3(x: number, y: number, z: number, seed: number): number {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(z | 0, 2147483647);
+  h ^= Math.imul(seed | 0, 2246822519);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+function valueNoise3(x: number, y: number, z: number, seed: number): number {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const zi = Math.floor(z);
+  const u = smootherstep(x - xi);
+  const v = smootherstep(y - yi);
+  const w = smootherstep(z - zi);
+  const c000 = hash3(xi, yi, zi, seed);
+  const c100 = hash3(xi + 1, yi, zi, seed);
+  const c010 = hash3(xi, yi + 1, zi, seed);
+  const c110 = hash3(xi + 1, yi + 1, zi, seed);
+  const c001 = hash3(xi, yi, zi + 1, seed);
+  const c101 = hash3(xi + 1, yi, zi + 1, seed);
+  const c011 = hash3(xi, yi + 1, zi + 1, seed);
+  const c111 = hash3(xi + 1, yi + 1, zi + 1, seed);
+  return lerp(
+    lerp(lerp(c000, c100, u), lerp(c010, c110, u), v),
+    lerp(lerp(c001, c101, u), lerp(c011, c111, u), v),
+    w,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Bake
 // ---------------------------------------------------------------------------
@@ -224,9 +269,53 @@ export interface BallBakeOptions {
 const CHANNEL_WIDTH = 0.0060;
 const CHANNEL_DEPTH = 0.0025;
 const PEBBLE_PITCH = 0.0019;
-const PEBBLE_HEIGHT = 0.00033;
+const PEBBLE_HEIGHT = 0.00040;
+/**
+ * Wavelengths of the two grain-clumping octaves, in metres. The 1.9 mm pebble
+ * is sub-pixel at every framing the rubric measures (0.8 px at RIM, 0.44 px at
+ * FLOOR), so on its own it band-limits into a roughness constant before it can
+ * ever stipple anything. Real moulded pebble is not a perfect lattice: its
+ * density and depth clump over several pitches, and *that* band is what carries
+ * §4.2's "grainy and irregular" specular to the distances the ball is actually
+ * seen at. 4.4 mm is ~1.9 px at RIM and ~1.0 px at FLOOR, which is exactly the
+ * decay §4.2 describes.
+ */
+const GRAIN_COARSE = 0.0044;
+const GRAIN_FINE = 0.0024;
 /** Inflation valve — small, but it is the only asymmetry on the whole cover. */
 const VALVE_RADIUS = 0.0042;
+
+/**
+ * Colour of the moulded rubber rib in the *mip chain*, sRGB — the mean of the
+ * grime-varied value level 0 uses (44–64).
+ *
+ * It is the mean and not a darker bias, and that is a measured decision rather
+ * than an assumption. §4.3's remaining miss is that the rib reads at 21% of
+ * adjacent leather at macro and 68% at RIM, and the reviewer's suggested lever
+ * for it was to "bias the channel's albedo/AO so it survives 3–4 mip levels".
+ * Tried: dropping this to (26, 23, 21) took macro from 21% to 17% and moved RIM
+ * from 68% to 70% — i.e. all of the cost and none of the gain. The rib in the
+ * *texture* is already deep enough; what limits it on screen is that a 6 mm
+ * channel is 1.7 px at RIM and loses roughly two thirds of its contrast to TAA,
+ * the resolve pass and the additive specular floor sitting on top of it. The
+ * lever that would work is a smaller specular floor, which §4.2 and §4.4's
+ * annulus both need to stay large.
+ */
+const RIB_RGB: readonly [number, number, number] = [54, 48, 45];
+const RIB_ROUGH = 0.37;
+const RIB_AO = 0.31;
+
+/**
+ * Base leather albedo, sRGB. §4.4 asks for hue 22–30°, saturation 62–78% and
+ * value 130–175 *on screen*, and the display chain between here and there is
+ * not hue-preserving: ACES plus the grade's highlight desaturation and its warm
+ * R − B ceiling both pull a saturated orange toward red as they compress it.
+ * This is therefore the pre-image of the wanted screen colour under that chain,
+ * solved against a measured frame, not the screen colour itself.
+ */
+const LEATHER_R = 248;
+const LEATHER_G = 140;
+const LEATHER_B = 4;
 
 function makeCanvas(w: number, h: number): HTMLCanvasElement {
   const c = document.createElement('canvas');
@@ -308,9 +397,17 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
 
   const albedo = new ImageData(W, H);
   const orm = new ImageData(W, H);
+  // The two layers the channel is composited from. Keeping them apart is what
+  // lets the mip chain rebuild the rib at every level instead of box-filtering
+  // it into a grey smear — see the re-composite after the loop.
+  const leatherLayer = new ImageData(W, H);
+  /** R = rib coverage, G = leather AO, B = leather roughness. */
+  const maskLayer = new ImageData(W, H);
   const height = new Float32Array(W * H);
   const A = albedo.data;
   const O = orm.data;
+  const LA = leatherLayer.data;
+  const MK = maskLayer.data;
 
   // --- angular feature sizes ------------------------------------------------
   const halfChannel = CHANNEL_WIDTH * 0.5 / R;
@@ -318,18 +415,30 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
   // π/4 radians per unit `a`, which is where this is calibrated.
   const pitchA = PEBBLE_PITCH / R / QUARTER_PI;
   const texelsPerPitch = (pitchA * 0.5) * inner;
-  // If the bake cannot resolve a pebble, open the pitch up rather than alias it
-  // into a moiré; the amplitude comes down to match so it never reads as golf
-  // ball dimpling.
-  const pitchScale = texelsPerPitch < 3.2 ? 3.2 / texelsPerPitch : 1;
-  const pebbleK = 1 / (pitchA * pitchScale);
-  const pebbleAmp = PEBBLE_HEIGHT / Math.max(1, pitchScale * 0.85);
+  // The pitch is *physical at every tier*. §4.2 fixes it at 1.6–2.2 mm and
+  // opening it up to fit the texel budget is precisely the golf-ball failure
+  // the same section names — at `low` the old guard stretched it to 5.0 mm.
+  // What scales with the budget instead is amplitude: under about two texels
+  // per pitch the lattice is below Nyquist and has to fade into a roughness
+  // constant, which is the same thing the mip chain does as the ball recedes.
+  const pebbleK = 1 / pitchA;
+  const pebbleFade = clamp01((texelsPerPitch - 1.9) / 1.5);
+  const pebbleAmp = PEBBLE_HEIGHT * pebbleFade;
+  // Box-filter the lattice over exactly one texel. Near the Nyquist limit that
+  // needs more taps, or the supersample itself beats against the grid.
+  const SS = texelsPerPitch >= 3.4 ? 2 : 4;
+  const ssStep = 1 / (texelsPerPitch * SS);
+  const ssBase = -0.5 / texelsPerPitch + ssStep * 0.5;
 
   // --- surface variation ----------------------------------------------------
   const mottle = sphereNoise(seed + 11, 6, 2.2, 5.5);
   const mottleFine = sphereNoise(seed + 29, 5, 9, 17);
   const wearField = sphereNoise(seed + 47, 5, 2.6, 6.0);
   const grimeField = sphereNoise(seed + 71, 4, 3.5, 8.0);
+  // Millimetre-scale grain clumping. Direction-space frequency: one lattice
+  // cell spans `R / GRAIN` radians, i.e. exactly one wavelength of arc.
+  const grainKa = R / GRAIN_COARSE;
+  const grainKb = R / GRAIN_FINE;
 
   // Per-panel manufacturing scatter: hides between −4 and +4 sRGB units.
   const prng = makeRng(seed + 101);
@@ -389,10 +498,11 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
         const pid = seamOut[1];
         // Flat-bottomed groove with steep walls — a moulded rib, not a valley.
         const groove = 1 - smootherstep(clamp01((t - 0.52) / 0.48));
-        // A slight bead of leather squeezed up either side of the rib. This is
-        // what produces the bright specular lip along the channel.
+        // A bead of leather squeezed up either side of the rib. This is what
+        // produces the bright specular lip along the channel, and it has to be
+        // a real ridge — 0.14 mm of it read as nothing.
         const lip =
-          Math.exp(-((t - 1.16) * (t - 1.16)) / 0.10) * smoothstep((t - 0.72) / 0.62);
+          Math.exp(-((t - 1.18) * (t - 1.18)) / 0.24) * smoothstep((t - 0.74) / 0.58);
         const pebMask = smoothstep((t - 0.96) / 0.42);
 
         // --- pebble ---------------------------------------------------------
@@ -400,50 +510,77 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
         // low-frequency domain warp breaks the regularity so it reads as
         // moulded grain rather than as a screen pattern.
         let dome = 0;
-        if (pebMask > 0.001) {
-          const wx = (valueNoise2(a * 9.0, b * 9.0, seed + 3) - 0.5) * 0.55;
-          const wy = (valueNoise2(a * 9.0 + 31, b * 9.0 - 17, seed + 5) - 0.5) * 0.55;
+        if (pebMask > 0.001 && pebbleFade > 0.001) {
+          // Two warp octaves. The slow one (≈21 mm) shears whole regions of
+          // lattice; the fast one (≈5 mm, a couple of pitches) is what stops
+          // the neighbourhood of any one pebble from reading as a screen
+          // pattern, which one octave on its own does not.
+          const wx =
+            (valueNoise2(a * 9.0, b * 9.0, seed + 3) - 0.5) * 0.55 +
+            (valueNoise2(a * 38.0, b * 38.0, seed + 17) - 0.5) * 0.42;
+          const wy =
+            (valueNoise2(a * 9.0 + 31, b * 9.0 - 17, seed + 5) - 0.5) * 0.55 +
+            (valueNoise2(a * 38.0 - 11, b * 38.0 + 23, seed + 19) - 0.5) * 0.42;
           const p0 = (a + wx * pitchA * 2.2) * pebbleK;
           const q0 = (b + wy * pitchA * 2.2) * pebbleK;
-          // 2x2 supersample: the lattice is close to the texel limit and this
-          // is what keeps it from beating against the grid.
           let acc = 0;
-          for (let s = 0; s < 4; s++) {
-            const p = p0 + ((s & 1) - 0.5) * 0.25;
-            const q = q0 + (((s >> 1) & 1) - 0.5) * 0.25;
-            const c1 = Math.cos(6.2831853 * p);
-            const c2 = Math.cos(6.2831853 * (p * 0.5 + q * SQRT3_2));
-            const c3 = Math.cos(6.2831853 * (-p * 0.5 + q * SQRT3_2));
-            const hx = clamp01(((c1 + c2 + c3) / 3 + 0.5) / 1.5);
-            acc += smoothstep((hx - 0.30) / 0.70);
+          for (let sy = 0; sy < SS; sy++) {
+            const q = q0 + ssBase + sy * ssStep;
+            for (let sx = 0; sx < SS; sx++) {
+              const p = p0 + ssBase + sx * ssStep;
+              const c1 = Math.cos(6.2831853 * p);
+              const c2 = Math.cos(6.2831853 * (p * 0.5 + q * SQRT3_2));
+              const c3 = Math.cos(6.2831853 * (-p * 0.5 + q * SQRT3_2));
+              const hx = clamp01(((c1 + c2 + c3) / 3 + 0.5) / 1.5);
+              acc += smoothstep((hx - 0.30) / 0.70);
+            }
           }
           // Height scatter between neighbouring pebbles.
           const vary = 0.72 + 0.56 * valueNoise2(p0 * 0.85, q0 * 0.85, seed + 13);
-          dome = Math.sqrt(acc * 0.25) * vary * pebMask;
+          dome = Math.sqrt(acc / (SS * SS)) * vary * pebMask;
         }
 
-        height[idx] = -CHANNEL_DEPTH * groove + CHANNEL_DEPTH * 0.055 * lip + pebbleAmp * dome;
+        // --- grain clumping ---------------------------------------------------
+        // Two octaves at 4.4 mm and 2.4 mm. The pebble lattice itself is
+        // sub-pixel at every framing the rubric measures, so this is the band
+        // that actually reaches the screen: it stipples the specular at RIM and
+        // has decayed to about a unit by FLOOR, which is §4.2's whole effect.
+        const clump =
+          (valueNoise3(nx * grainKa, ny * grainKa, nz * grainKa, seed + 211) - 0.5) * 0.66 +
+          (valueNoise3(nx * grainKb, ny * grainKb, nz * grainKb, seed + 307) - 0.5) * 0.34;
+
+        height[idx] =
+          -CHANNEL_DEPTH * groove +
+          CHANNEL_DEPTH * 0.36 * lip +
+          pebbleAmp * dome +
+          clump * 0.00021 * pebMask;
 
         // --- leather colour ---------------------------------------------------
         const mo = mottle(nx, ny, nz) - 0.5;
         const mf = mottleFine(nx, ny, nz) - 0.5;
-        // Warm burnt orange: hue ~21°, saturation ~0.82 in albedo, which lands
-        // near 0.65 on screen once the key light and the coat have had their
-        // say. Safety-orange is a traffic cone; this is tanned leather.
-        let r = 190 + mo * 23 + mf * 9 + panelTone[pid];
-        let g = 78 + mo * 12 + mf * 5 + panelTone[pid] * 0.55;
-        let bl = 22 + mo * 4 - mf * 3 + panelTone[pid] * 0.3;
-        let rough = 0.425 + panelRough[pid] + mo * 0.045 - mf * 0.02;
+        let r = LEATHER_R + mo * 17 + mf * 7 + panelTone[pid];
+        let g = LEATHER_G + mo * 13 + mf * 6 + panelTone[pid] * 0.62;
+        let bl = LEATHER_B + mo * 5 - mf * 2 + panelTone[pid] * 0.42;
+        let rough = 0.40 + panelRough[pid] + mo * 0.045 - mf * 0.02;
         let ao = 1;
 
         // The crown of each pebble catches light and wears smooth; the valleys
-        // between them hold dirt and read rougher and a shade darker.
-        const crown = dome;
-        r += (crown - 0.42) * 15;
-        g += (crown - 0.42) * 8;
+        // between them hold dirt and read rougher and a shade darker. Fading
+        // the *deviation* rather than the field means an under-sampled tier
+        // collapses to the lattice's mean instead of to a moiré.
+        const crown = 0.42 + (dome - 0.42) * pebbleFade;
+        r += (crown - 0.42) * 12;
+        g += (crown - 0.42) * 7;
         bl += (crown - 0.42) * 3;
-        rough += (0.5 - crown) * 0.17;
+        rough += (0.5 - crown) * 0.22;
         ao -= (1 - crown) * 0.17 * pebMask;
+
+        // Grain clumping rides mostly in roughness — §4.2 is explicit that the
+        // albedo stays smooth and the *sheen* is what breaks up.
+        rough += clump * 0.70 * pebMask;
+        r += clump * 8.5 * pebMask;
+        g += clump * 5.0 * pebMask;
+        bl += clump * 2.2 * pebMask;
 
         // --- polish from use ---------------------------------------------------
         // Hands and hardwood only ever touch the raised leather, so the polish
@@ -463,37 +600,17 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
         g -= shoulder * 9;
         bl -= shoulder * 4;
         ao -= shoulder * 0.22;
-        // The bead of leather squeezed up against the rib is burnished. It is
-        // carried almost entirely in roughness, not albedo — a lightened halo
-        // beside every channel reads as a painted outline, which is exactly the
-        // thing we are trying not to look like.
-        rough -= lip * 0.16;
-        r += lip * 4;
-        g += lip * 3;
-        bl += lip * 2;
-
-        // --- the rib itself ------------------------------------------------------
-        if (groove > 0.001) {
-          // Black rubber fills only the floor of the groove; the walls stay
-          // leather, so the channel has a lit side and a shadowed side instead
-          // of being one flat black stripe.
-          // The rib fills the groove; only its top edge stays leather. Kept off
-          // the floor of the sRGB range on purpose — a channel crushed to 0
-          // is a black stripe, and the real thing sits around a quarter of the
-          // luminance of the leather beside it, never at nothing.
-          const grime = clamp01((grimeField(nx, ny, nz) - 0.40) * 2.2);
-          const rr = 42 + grime * 21;
-          const rg = 37 + grime * 18;
-          const rb = 35 + grime * 14;
-          const k = smoothstep((groove - 0.02) / 0.22);
-          r += (rr - r) * k;
-          g += (rg - g) * k;
-          bl += (rb - bl) * k;
-          // Moulded rubber is *glossier* than pebbled leather — the single most
-          // reliable cue that the channel is a different material.
-          rough += (0.27 + grime * 0.22 - rough) * k;
-          ao += (0.30 + 0.18 * (1 - groove) - ao) * k;
-        }
+        // The burnished bead beside the rib. Round 0 carried it almost entirely
+        // in roughness, and with no specular lobe to modulate it measured 1.03x
+        // the adjacent leather instead of §4.3's 1.3–1.6x. Roughness still does
+        // most of the work — it is what makes the lip swap sides with the key —
+        // but enough now sits in albedo and in the ridge's own normal that the
+        // rib reads as moulded at any lighting angle.
+        rough -= lip * 0.42;
+        r += lip * 58;
+        g += lip * 34;
+        bl += lip * 14;
+        ao += lip * 0.12;
 
         // --- valve ---------------------------------------------------------------
         const vdot = nx * valve[0] + ny * valve[1] + nz * valve[2];
@@ -510,15 +627,54 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
           ao -= dish * 0.12 + bore * 0.4;
         }
 
-        A[o] = clamp01(r / 255) * 255;
-        A[o + 1] = clamp01(g / 255) * 255;
-        A[o + 2] = clamp01(bl / 255) * 255;
+        const lr = clamp01(r / 255) * 255;
+        const lg = clamp01(g / 255) * 255;
+        const lb = clamp01(bl / 255) * 255;
+        const lrough = clamp01(Math.max(0.14, Math.min(0.78, rough)));
+        const lao = clamp01(ao);
+
+        // --- the rib itself ------------------------------------------------------
+        // Black rubber fills only the floor of the groove; the walls stay
+        // leather, so the channel has a lit side and a shadowed side instead of
+        // being one flat black stripe. Kept off the floor of the sRGB range on
+        // purpose — a channel crushed to 0 is a stripe, and the real thing sits
+        // around a quarter of the luminance of the leather beside it.
+        const cov = groove > 0.001 ? smoothstep((groove - 0.02) / 0.22) : 0;
+        let fr = lr;
+        let fg = lg;
+        let fb = lb;
+        let frough = lrough;
+        let fao = lao;
+        if (cov > 0.001) {
+          const grime = clamp01((grimeField(nx, ny, nz) - 0.40) * 2.2);
+          fr += (44 + grime * 20 - lr) * cov;
+          fg += (39 + grime * 17 - lg) * cov;
+          fb += (36 + grime * 14 - lb) * cov;
+          // Moulded rubber is *glossier* than pebbled leather — the single most
+          // reliable cue that the channel is a different material.
+          frough += (0.27 + grime * 0.22 - lrough) * cov;
+          fao += (0.30 + 0.18 * (1 - groove) - lao) * cov;
+        }
+
+        A[o] = fr;
+        A[o + 1] = fg;
+        A[o + 2] = fb;
         A[o + 3] = 255;
 
-        O[o] = clamp01(ao) * 255;
-        O[o + 1] = clamp01(Math.max(0.18, Math.min(0.78, rough))) * 255;
+        O[o] = clamp01(fao) * 255;
+        O[o + 1] = clamp01(Math.max(0.14, Math.min(0.78, frough))) * 255;
         O[o + 2] = 0;
         O[o + 3] = 255;
+
+        LA[o] = lr;
+        LA[o + 1] = lg;
+        LA[o + 2] = lb;
+        LA[o + 3] = 255;
+
+        MK[o] = cov * 255;
+        MK[o + 1] = lao * 255;
+        MK[o + 2] = lrough * 255;
+        MK[o + 3] = 255;
       }
     }
   }
@@ -561,22 +717,35 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
   // Normals first: each level records how much the pebble has averaged out, and
   // that lost detail is pushed into the matching roughness level so a receding
   // ball loses its grain to a broader specular lobe instead of to aliasing.
+  //
+  // Albedo and ORM are *not* box-filtered directly. A 6 mm rib crossing a
+  // 6.2 mm texel splits across two texels, and averaging leather into both is
+  // what took the channel core from 37% of adjacent leather at macro to 61–72%
+  // at gameplay distance — simultaneously too wide and too shallow, which is
+  // exactly what a box filter does to a thin dark line. Instead the leather
+  // layer and the rib coverage are filtered separately and the rib is
+  // *rebuilt* at every level from a contrast-restored coverage. The unsharp
+  // term is what puts the depth back without widening the line: it lifts the
+  // core, where coverage exceeds its neighbourhood, and trims the skirt, where
+  // it does not.
   const albedoLevels: HTMLCanvasElement[] = [imageDataToCanvas(albedo)];
   const normalLevels: HTMLCanvasElement[] = [imageDataToCanvas(normal)];
   const ormLevels: HTMLCanvasElement[] = [imageDataToCanvas(orm)];
 
-  let aCur = albedo;
   let nCur = normal;
-  let oCur = orm;
+  let lCur = leatherLayer;
+  let mCur = maskLayer;
   let cw = W;
   let ch = H;
   let cell = F;
+  /** How hard the coverage contrast is restored. 0 reproduces a box filter. */
+  const COV_SHARPEN = 3.0;
   while (cell > 1) {
-    const an = halveAtlas(aCur, cw, ch);
     const nn = halveAtlas(nCur, cw, ch);
-    const on = halveAtlas(oCur, cw, ch);
-    cw = an.w;
-    ch = an.h;
+    const ln = halveAtlas(lCur, cw, ch);
+    const mn = halveAtlas(mCur, cw, ch);
+    cw = ln.w;
+    ch = ln.h;
     cell >>= 1;
 
     // Re-normalise the averaged normal and remember its shortened length.
@@ -593,18 +762,64 @@ export function bakeBallMaps(opts: BallBakeOptions): BallMapSet {
       nd[i + 1] = (vy * inv * 0.5 + 0.5) * 255;
       nd[i + 2] = (vz * inv * 0.5 + 0.5) * 255;
     }
-    const od = on.data.data;
-    for (let i = 0, p = 0; i < od.length; i += 4, p++) {
-      const rr = od[i + 1] / 255;
-      od[i + 1] = clamp01(Math.min(0.82, Math.sqrt(rr * rr + 2.1 * varLevel[p]))) * 255;
+
+    // Contrast-restored coverage, blurred strictly inside each atlas cell.
+    const md = mn.data.data;
+    const sharp = new Float32Array(cw * ch);
+    for (let ty = 0; ty < ch; ty++) {
+      const cy0 = ty - (ty % cell);
+      for (let tx = 0; tx < cw; tx++) {
+        const cx0 = tx - (tx % cell);
+        let sum = 0;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const yy = ty + dy;
+          if (yy < cy0 || yy >= cy0 + cell) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = tx + dx;
+            if (xx < cx0 || xx >= cx0 + cell) continue;
+            sum += md[(yy * cw + xx) * 4];
+            n++;
+          }
+        }
+        const p = ty * cw + tx;
+        const c = md[p * 4] / 255;
+        sharp[p] = clamp01(c + COV_SHARPEN * (c - sum / (n * 255)));
+      }
     }
 
-    albedoLevels.push(imageDataToCanvas(an.data));
+    const lv = new ImageData(cw, ch);
+    const ov = new ImageData(cw, ch);
+    const ld = ln.data.data;
+    const lo = lv.data;
+    const oo = ov.data;
+    for (let i = 0, p = 0; i < ld.length; i += 4, p++) {
+      const k = sharp[p];
+      lo[i] = ld[i] + (RIB_RGB[0] - ld[i]) * k;
+      lo[i + 1] = ld[i + 1] + (RIB_RGB[1] - ld[i + 1]) * k;
+      lo[i + 2] = ld[i + 2] + (RIB_RGB[2] - ld[i + 2]) * k;
+      lo[i + 3] = 255;
+
+      const lAo = md[i + 1] / 255;
+      const lRough = md[i + 2] / 255;
+      oo[i] = clamp01(lAo + (RIB_AO - lAo) * k) * 255;
+      // Toksvig: the pebble that averaged out of the normal comes back as a
+      // broader lobe. The coefficient and the ceiling were 2.1 and 0.82, which
+      // drove a channel wall straight to the cap by mip 1 and left the ball
+      // with no specular lobe at all to modulate — the pebble and the channel
+      // lip are both downstream of that.
+      const rr = lRough + (RIB_ROUGH - lRough) * k;
+      oo[i + 1] = clamp01(Math.min(0.68, Math.sqrt(rr * rr + 1.0 * varLevel[p]))) * 255;
+      oo[i + 2] = 0;
+      oo[i + 3] = 255;
+    }
+
+    albedoLevels.push(imageDataToCanvas(lv));
     normalLevels.push(imageDataToCanvas(nn.data));
-    ormLevels.push(imageDataToCanvas(on.data));
-    aCur = an.data;
+    ormLevels.push(imageDataToCanvas(ov));
     nCur = nn.data;
-    oCur = on.data;
+    lCur = ln.data;
+    mCur = mn.data;
   }
 
   const aniso = opts.anisotropy ?? 8;

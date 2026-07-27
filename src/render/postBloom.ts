@@ -13,16 +13,31 @@
  * **The threshold is a real number, not a guess.** `LightingSystem.grade`
  * publishes the rig's scene-linear levels for exactly this: lit hardwood sits at
  * ~0.19, the hottest varnish streak and sweat specular around 0.9, and the LED
- * ribbon and fixture pods at 1.7. Thresholding at the published 1.1 therefore
- * makes the bloom sources countable — boards, jumbotron, fixture reflections in
- * the glass and chrome, camera flashes — and leaves lit hardwood completely
- * alone, which is the explicit test in §8.1.
+ * ribbon and fixture pods at 1.7. `PostFX` derives the threshold from the
+ * exposure so that bloom *engages* at 1.15–1.5× display white as §8.1 requires
+ * — at exposure 1.3 that lands at 1.13, above the hottest varnish streak and
+ * well under the boards, so the sources stay countable and lit hardwood is left
+ * completely alone.
  *
  * Owned by the post-processing agent.
  */
 
 import { AdditiveBlending, Vector2, type WebGLRenderTarget, type WebGLRenderer } from 'three';
 import { POST_COMMON, PostQuad, ScreenPass, disposeTarget, makeTarget } from './postPasses';
+
+/**
+ * Half-width of the quadratic knee, as a fraction of the threshold.
+ *
+ * Bloom starts contributing at `threshold * (1 - this)`, so the knee is not a
+ * softening detail — it *is* where §8.1's "engage only above roughly 1.15–1.5×
+ * display white" is decided. At the old half-width the fade-in began at 0.5×
+ * the threshold, which at exposure 1.3 was 0.71× display white: below white, on
+ * the wrong side of the criterion by construction even though the delivered
+ * haze was small (0.26–0.39% of each frame reached it). `PostFX` divides its
+ * target engagement by `1 - BLOOM_KNEE_FRACTION` to place the threshold, so the
+ * two numbers stay consistent whatever either becomes.
+ */
+export const BLOOM_KNEE_FRACTION = 0.18;
 
 const PREFILTER_FRAGMENT = /* glsl */ `
 precision highp float;
@@ -126,8 +141,10 @@ export class BloomChain {
     this.prefilter = new ScreenPass(PREFILTER_FRAGMENT, {
       tColor: { value: null },
       uTexel: { value: new Vector2() },
-      uThreshold: { value: 1.1 },
-      uKnee: { value: 0.55 },
+      // Overwritten every frame by setThreshold; kept consistent with it so a
+      // first frame before the lighting system reports is not a different look.
+      uThreshold: { value: 1.13 },
+      uKnee: { value: 1.13 * BLOOM_KNEE_FRACTION },
       uClamp: { value: 24 },
     });
     this.downsample = new ScreenPass(DOWNSAMPLE_FRAGMENT, {
@@ -154,9 +171,7 @@ export class BloomChain {
 
   setThreshold(threshold: number): void {
     this.prefilter.set('uThreshold', threshold);
-    // A knee half the threshold wide: the fade-in spans 0.55–1.1× the LED
-    // level, which is short enough that hardwood never enters it.
-    this.prefilter.set('uKnee', Math.max(0.05, threshold * 0.5));
+    this.prefilter.set('uKnee', Math.max(0.02, threshold * BLOOM_KNEE_FRACTION));
   }
 
   resize(width: number, height: number): void {

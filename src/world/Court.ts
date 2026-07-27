@@ -110,27 +110,41 @@ export class CourtSystem implements System {
      * deep blue that measures 64% on the swatch comes back past §2.5's 72%
      * ceiling once the grade has been through it.
      */
-    uKeyColor: { value: new Color('#31506d') },
+    uKeyColor: { value: new Color('#3a5c7c') },
     uLineColor: { value: new Color('#e4ddcc') },
-    /** x: paint bleed (texels), y: grain telegraph, z: normal flatten, w: key opacity. */
-    uPaint: { value: new Vector4(0.22, 0.2, 0.72, 0.95) },
+    /**
+     * x: paint bleed (texels), y: grain telegraph, z: **grain**-normal flatten,
+     * w: key opacity.
+     *
+     * z used to flatten *all* of the surface normal inside a painted region, and
+     * the tonal telegraph used to attenuate the joinery along with the grain.
+     * Both were wrong for the same reason: paint fills the grain — it is a
+     * few tens of microns of pigment on sanded wood — but a milled groove is a
+     * 2 mm channel cut through the deck and the paint lies *in* it. Killing the
+     * joinery under the lines, the key and the logo made every painted region
+     * read flatter than the wood around it, which is the same class of error as
+     * putting the paint on top of the varnish. The joinery normal and its
+     * specular break are now carried through paint at full geometric strength
+     * (see `courtJoinN` below) and z applies only to the tiling grain.
+     */
+    uPaint: { value: new Vector4(0.22, 0.22, 0.55, 0.95) },
     /** x: board tone amp, y: grain tone amp, z: roughness base, w: roughness range. */
-    uWood: { value: new Vector4(0.16, 1.55, ROUGH_BASE, ROUGH_RANGE) },
+    uWood: { value: new Vector4(0.19, 2.0, ROUGH_BASE, ROUGH_RANGE) },
     /**
      * x: board width (m), y: grain→roughness, z: board grid origin (m),
-     * w: coat veil — how far the top of the floor's range is pulled toward
-     * neutral.
+     * w: coat veil — how far the *hottest* part of the floor's range is pulled
+     * toward neutral.
      *
-     * A gloss coat's first-surface reflection is achromatic and rises with how
-     * hard the lobe is being driven, so what comes back through it is the
-     * maple's hue *diluted*: a wet broadcast floor is amber through the
-     * mid-tones and close to white in its streaks. Doing that here rather than
-     * leaving it to the tone curve is what lets the wood stay honestly warm
-     * where §8.3 wants the mid-tones honest while the top fifth of the range —
-     * which the hardwood owns in every framing, and which is what §8.3's
-     * highlight split actually measures — goes neutral.
+     * A gloss coat's first-surface reflection is achromatic, so the core of a
+     * bank streak is genuinely close to white. What this must not do is bleach
+     * the wood: at 0.8, with an onset at 0.17 scene-linear — which is where
+     * ordinary lit hardwood *sits* (`LEVELS.court = 0.19`) — the veil was
+     * grading the whole floor toward its own luminance and the maple came back
+     * as pale grey laminate. Cut to 0.10 and moved to an onset the mid-tones
+     * cannot reach, so it touches only the specular core, which is the only
+     * place the physics asks for it.
      */
-    uBoard: { value: new Vector4(BOARD_WIDTH, 0.16, 0, 0.8) },
+    uBoard: { value: new Vector4(BOARD_WIDTH, 0.22, 0, 0.1) },
     /**
      * Milled joinery, all drawn analytically off the world position.
      *
@@ -144,7 +158,7 @@ export class CourtSystem implements System {
      * never had the butt joints in the first place. From a coordinate they are
      * exact at any distance and box-filter down cleanly instead of aliasing.
      */
-    uSeam: { value: new Vector4(SEAM_HALF, 0.5, 0.34, 1.35) },
+    uSeam: { value: new Vector4(SEAM_HALF, 0.78, 0.58, 1.35) },
     /**
      * Portable-floor panel module. x: panel length along the boards (m),
      * y: boards per panel across, z: cross-joint darkening, w: extra darkening
@@ -153,7 +167,17 @@ export class CourtSystem implements System {
      * §2.1 asks for the panel grid at 25–40% of the board-seam contrast, which
      * is what z and w are set against uSeam.y to give.
      */
-    uPanel: { value: new Vector4(PANEL_LENGTH, PANEL_BOARDS, 0.16, 0.3) },
+    uPanel: { value: new Vector4(PANEL_LENGTH, PANEL_BOARDS, 0.22, 0.34) },
+    /**
+     * Milled-joinery normal, radians of tilt at the wall of the groove.
+     *
+     * x: strip seam and panel edge (tilts across the boards), y: butt joint
+     * (tilts along them). A 2.2 mm groove about 0.15 mm deep has ~8° walls;
+     * these run a little steeper because what has to survive is the *filtered*
+     * average, and the two walls of a sub-pixel groove cancel. Applied after
+     * the paint flatten, so the groove is still a groove under the sideline.
+     */
+    uJoinN: { value: new Vector2(0.34, 0.26) },
     /**
      * Specular shoulder knees: direct, indirect (env), clearcoat.
      *
@@ -164,8 +188,17 @@ export class CourtSystem implements System {
      * white sheet over the maple, which is exactly how hardwood ends up
      * reading as pale laminate no matter what the albedo says. Held here so
      * the coat can still go wet-looking without ever outrunning the wood.
+     *
+     * Round 5 measured what that meant. With the specular shouldered off
+     * entirely the same near floor read R − B = +12 to +24 and the streaked
+     * mid floor +23; with it on, +5 to +10. The wood's chroma was not being
+     * lost in the albedo or in the grade, it was being *diluted* by an
+     * achromatic lobe carrying a third of the floor's luminance, so the direct
+     * knee comes down by better than half. `y` is also the ceiling on the
+     * planar tap, and that one goes *up*: the grazing reflection of the ceiling
+     * is what the near hardwood is supposed to be lit by.
      */
-    uSpec: { value: new Vector3(0.9, 0.22, 0.5) },
+    uSpec: { value: new Vector3(0.42, 0.4, 0.24) },
     /**
      * The varnish tint. Poured polyurethane on maple is amber and several
      * coats deep, so almost everything the eye reads as "the highlight" has
@@ -177,16 +210,23 @@ export class CourtSystem implements System {
      * Held much closer to neutral than it was. The hardwood specular owns the
      * top fifth of the range in every framing, so §8.3's highlight split is
      * measuring this number almost directly — at (1, 0.925, 0.795) it read
-     * 18.9–24.3 against a 4–12 target on all three frames.
+     * 18.9–24.3 against a 4–12 target on all three frames, and at
+     * (1, 0.978, 0.94) it still read 12.7 on both FLOOR framings. The warmth
+     * belongs in the diffuse, where §8.3's own last bullet wants it ("the
+     * hardwood must still read as maple"), not in the lobe the highlight check
+     * samples: `courtBake`'s base is correspondingly warmer and more saturated.
      */
-    uCoat: { value: new Color(1.0, 0.978, 0.94) },
+    uCoat: { value: new Color(1.0, 0.988, 0.968) },
     uSdfRange: { value: SDF_RANGE },
     uLogoR: { value: LOGO_RADIUS },
     uReflTex: { value: null as unknown },
     uReflMx: { value: new Matrix4() },
+    /** Reflection target size, texels. Only its aspect is read, to turn a
+     * board-aligned UV direction into a step of a stated screen length. */
+    uReflSize: { value: new Vector2(1, 1) },
     /**
      * x: how much of the environment's specular the planar tap stands in for,
-     * y: roughness→LOD, z: max LOD, w: streak half-length in reflection UV.
+     * y: roughness→LOD, z: max LOD, w: streak half-length in **frame heights**.
      *
      * x is the share of the environment probe's specular the tap stands in
      * for. It is not 1: the reflection frustum is the camera's, so the tap sees
@@ -198,8 +238,19 @@ export class CourtSystem implements System {
      * hardwood measured 56 against 175 for the same floor at twenty metres, and
      * the bottom fifth of a FLOOR framing came back as a dim reflection of the
      * far bowl instead of as wood.
+     *
+     * `w` is now a half-length in frame heights, not in reflection UV. In UV it
+     * was 0.07 before the roughness term and 0.09 after, which on a 9:19.5
+     * frame is ±0.09 of the *short* axis and ±0.22 of it on the outer taps —
+     * a smear four hundred reference pixels long. Every reflected player and
+     * every LED band was drawn down the frame as a soft column, which is what
+     * the review measured as a screen-space smear running 24–59° off the
+     * boards: at that length the reflected object's own vertical structure wins
+     * and the board-aligned offset is invisible. At 0.0085 the inner taps are
+     * ±20 reference pixels and the outer ±48, which is a coat lobe rather than
+     * a comet tail.
      */
-    uReflParams: { value: new Vector4(0.5, 5.5, 4.5, 0.07) },
+    uReflParams: { value: new Vector4(0.85, 5.0, 4.5, 0.0085) },
   };
 
   init(engine: Engine): void {
@@ -329,7 +380,7 @@ export class CourtSystem implements System {
     // The tap count is a define, so it has to be part of the key or the two
     // variants share a compiled program.
     mat.customProgramCacheKey = () =>
-      `ballin-hardwood-2${mat.defines?.WIDE_REFLECTION !== undefined ? '-wide' : ''}`;
+      `ballin-hardwood-3${mat.defines?.WIDE_REFLECTION !== undefined ? '-wide' : ''}`;
     this.material = mat;
 
     const geo = new PlaneGeometry(totalW, totalD, 24, 14);
@@ -388,6 +439,7 @@ uniform vec4 uWood;
 uniform vec4 uBoard;
 uniform vec4 uSeam;
 uniform vec4 uPanel;
+uniform vec2 uJoinN;
 uniform vec3 uSpec;
 uniform vec3 uCoat;
 uniform float uSdfRange;
@@ -396,6 +448,7 @@ varying vec3 vWPos;
 #ifdef USE_PLANAR_REFLECTION
 uniform sampler2D uReflTex;
 uniform vec4 uReflParams;
+uniform vec2 uReflSize;
 uniform mat4 uReflMx;
 varying vec4 vReflCoord;
 #endif
@@ -418,6 +471,21 @@ float courtHash( float n ) {
 float courtGroove( float d, float halfW, float foot ) {
   float w = max( foot, halfW * 2.0 );
   return saturate( halfW * 2.0 / w ) * ( 1.0 - smoothstep( 0.0, w * 0.5, d ) );
+}
+
+/**
+ * The *wall* of the same groove: zero at its centre and at its lip, one in
+ * between, so multiplying by the sign of the offset gives the milled bevel's
+ * slope. This is what turns a tonal seam into a groove that catches light.
+ * It carries the same box filter as courtGroove, so when the channel drops
+ * below a pixel the two walls cancel to nothing rather than aliasing — which is
+ * correct, because at that distance a real groove is a tonal line and not a
+ * shape.
+ */
+float courtWall( float d, float halfW, float foot ) {
+  float w = max( foot, halfW * 2.0 );
+  float t = saturate( d / w );
+  return saturate( halfW * 2.0 / w ) * 4.0 * t * ( 1.0 - t );
 }
 
 // Signed-distance coverage. Line work is barely 2.6 texels wide in the bake,
@@ -464,12 +532,22 @@ float seamHalf = uSeam.x / uBoard.x;
 // The lip is the milled bevel and the finish that pools in it: three times as
 // wide at under half the depth, which is both what the joint physically looks
 // like and what survives the blur.
+// The lip is wider and deeper than it was, and the reason is the post chain
+// rather than the joinery: §7.4 puts a 3–8 reference-pixel circle of confusion
+// over the near floor and the TAA resolve adds to it, so a 1.2 px groove
+// arrives with a quarter of its depth. Round 4 measured the seam at 4.7 sRGB
+// peak-to-peak at the nearest FLOOR row against §2.1's 8–15. Widening the
+// shoulder to ±2.9 px and deepening it is what survives that blur as a 3–4 px
+// trough with a dark 1.5 px core, which is what the joint looks like anyway.
 float seam = max(
   courtGroove( dSeam, seamHalf, boardFoot ),
-  courtGroove( dSeam, seamHalf * 3.8, boardFoot ) * 0.45 );
+  courtGroove( dSeam, seamHalf * 4.6, boardFoot ) * 0.62 );
+float seamWall = courtWall( dSeam, seamHalf * 2.2, boardFoot ) * sign( boardCoord - seamId );
 // A panel edge is a strip edge on a real deck, so it is the same seam cut a
 // little deeper rather than a line of its own wandering across the boards.
-seam *= 1.0 + uPanel.w * step( mod( seamId, uPanel.y ), 0.5 );
+float panelEdge = 1.0 + uPanel.w * step( mod( seamId, uPanel.y ), 0.5 );
+seam *= panelEdge;
+seamWall *= panelEdge;
 
 // Butt joints. Strips are finite and the ends are staggered board to board, so
 // the pitch and the phase are both hashed off the board index — never a column
@@ -478,16 +556,34 @@ float jPitch = 1.35 + courtHash( boardId * 4.19 + 1.7 ) * uSeam.w;
 float jCoord = ( vWPos.x + courtHash( boardId * 9.31 + 0.4 ) * jPitch ) / jPitch;
 float jFoot = max( fwidth( vWPos.x ) / jPitch, 1e-5 );
 float jFrac = fract( jCoord );
-float joint = courtGroove( min( jFrac, 1.0 - jFrac ), uSeam.x * 0.8 / jPitch, jFoot );
+float jSide = jFrac < 0.5 ? -1.0 : 1.0;
+float jDist = min( jFrac, 1.0 - jFrac );
+float joint = max(
+  courtGroove( jDist, uSeam.x * 0.8 / jPitch, jFoot ),
+  courtGroove( jDist, uSeam.x * 3.0 / jPitch, jFoot ) * 0.5 );
+float jointWall = courtWall( jDist, uSeam.x * 1.8 / jPitch, jFoot ) * jSide;
 
 // Panel cross joints run unbroken across every board at the same station,
 // which is what distinguishes them from the staggered butt joints.
 float pCoord = vWPos.x / uPanel.x;
 float pFoot = max( fwidth( vWPos.x ) / uPanel.x, 1e-5 );
 float pFrac = fract( pCoord );
-float panelCut = courtGroove( min( pFrac, 1.0 - pFrac ), uSeam.x * 0.55 / uPanel.x, pFoot );
+float pSide = pFrac < 0.5 ? -1.0 : 1.0;
+float pDist = min( pFrac, 1.0 - pFrac );
+float panelCut = max(
+  courtGroove( pDist, uSeam.x * 0.55 / uPanel.x, pFoot ),
+  courtGroove( pDist, uSeam.x * 2.2 / uPanel.x, pFoot ) * 0.5 );
+float panelWall = courtWall( pDist, uSeam.x * 1.3 / uPanel.x, pFoot ) * pSide;
 
 float millCut = max( seam * uSeam.y, max( joint * uSeam.z, panelCut * uPanel.z ) );
+// The milled bevel, in world axes: the strip seam and the panel edge tilt the
+// surface *across* the boards, the butt joint *along* them. Kept as a world
+// vector and rotated into view space where the normal lives, so it does not
+// depend on the tangent frame the detail map happens to have been given.
+vec3 courtJoinN = vec3(
+  -( jointWall * uSeam.z + panelWall * uPanel.z ) * uJoinN.y,
+  0.0,
+  -seamWall * uSeam.y * uJoinN.x );
 
 // Buff and drag marks.
 //
@@ -515,9 +611,12 @@ vec3 woodTint = vec3( 0.72, 1.0, 1.55 );
 diffuseColor.rgb *= 1.0 + ( boardTone + courtGrain ) * woodTint + courtBuff * 0.075;
 diffuseColor.rgb *= courtMask.a * ( 1.0 - millCut );
 
-// Paint is pigment on sanded wood, then varnish. The grain, the scuffs and the
-// joinery under it still modulate what comes back.
-float telegraph = ( 1.0 + ( boardTone + courtGrain ) * uPaint.y ) * ( 1.0 - millCut * uPaint.y );
+// Paint is pigment on sanded wood, then varnish. The grain and the scuffs
+// telegraph through at 8–20% per §2.5; the joinery does *not* attenuate at all,
+// because a groove is a groove whether or not there is paint in it. Round 4
+// carried it at 20% and the milled seams, the butt joints and the panel grid
+// all disappeared under the sidelines, the key and the logo.
+float telegraph = ( 1.0 + ( boardTone + courtGrain ) * uPaint.y ) * ( 1.0 - millCut );
 
 // --- centre logo -------------------------------------------------------
 // Goes down before the line work, so the division line and the centre circle
@@ -545,14 +644,20 @@ roughnessFactor = uWood.z + courtMask.b * uWood.w;
 // and not only the base colour.
 roughnessFactor += ( 0.5 - courtDetail.a ) * uBoard.y;
 // The joinery breaks the coat as well as darkening it — a seam that only
-// darkens reads as a printed line rather than a groove.
-roughnessFactor += seam * 0.07 + joint * 0.055 + panelCut * 0.024;
+// darkens reads as a printed line rather than a groove. This is the half of
+// the joint that survives minification: once the channel is under a pixel its
+// two bevel walls cancel in the normal and only the roughness break is left,
+// which is exactly how a real seam fades out with distance.
+roughnessFactor += seam * 0.11 + joint * 0.085 + panelCut * 0.035;
 // Sole-polished streaks: rougher where the coat has been abraded, glassier in
 // the lanes nobody walks. Weighted by the bake's own traffic field so it stays
 // out of the corners and off the apron.
 roughnessFactor -= courtBuff * ( 0.045 + courtMask.b * 0.07 );
-// Paint fills the grain: marginally smoother under the same coat.
-roughnessFactor *= mix( 1.0, 0.9, courtPaint );
+// Paint fills the grain: marginally smoother under the same coat. §2.5 asks for
+// a 1–4% brighter, slightly tighter core, which is a few percent of roughness —
+// a tenth of it narrows the painted highlight enough that the centre mark reads
+// as a duller disc than the wood beside it.
+roughnessFactor *= mix( 1.0, 0.96, courtPaint );
 // The ceiling is §2.3's broad-axis cap read back through three's
 // alphaT = mix(roughness², 1, anisotropy²): past ~0.15 tight the wide axis
 // leaves the 0.18–0.30 band and the highlight stops having a core.
@@ -561,7 +666,13 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 0.26 );`,
       .replace(
         '#include <normal_fragment_maps>',
         /* glsl */ `#include <normal_fragment_maps>
-normal = normalize( mix( normal, nonPerturbedNormal, courtPaint * uPaint.z ) );`,
+// Paint fills the *grain* — a few tens of microns of pigment on sanded wood —
+// so the tiling detail normal is attenuated inside a painted region.
+normal = normalize( mix( normal, nonPerturbedNormal, courtPaint * uPaint.z ) );
+// The joinery is not attenuated by anything. It is a 2 mm channel cut through
+// the deck with the paint lying in it, and it is added after the flatten so a
+// sideline crossing a strip seam still shows the groove.
+normal = normalize( normal + ( viewMatrix * vec4( courtJoinN, 0.0 ) ).xyz );`,
       )
       .replace(
         '#include <lights_fragment_end>',
@@ -618,9 +729,19 @@ material.clearcoatRoughness = clamp(
 {
   vec2 ruv = vReflCoord.xy / max( vReflCoord.w, 1e-4 );
   float valid = step( 0.0, vReflCoord.w );
-  // Fade at the edges of the reflection frustum so nothing pops at the border.
-  float edge = smoothstep( 0.0, 0.05, ruv.x ) * smoothstep( 1.0, 0.95, ruv.x ) *
-               smoothstep( 0.0, 0.04, ruv.y ) * smoothstep( 1.0, 0.96, ruv.y );
+  // Fade at the edges of the reflection frustum so nothing pops at the border,
+  // and *only* there.
+  //
+  // This used to eat 4–5% of the frame on every side. On a floor the mirrored
+  // camera shares the main camera's screen mapping, so ruv.y → 0 is the bottom
+  // of the frame — which is the ground §2.3 reserves for the grazing-angle gain
+  // and §7.1 gives the bottom 20–30% of a FLOOR framing to. The near hardwood
+  // therefore had no reflection at all, measured 50.9 mean against §1.1's
+  // 95–140, and sat 1.37 stops over the lower bowl against the required 2.5–4.
+  // A grazing floor point reflects the *ceiling*, so this band is where the
+  // reflection should be brightest, not absent.
+  float edge = smoothstep( 0.0, 0.012, ruv.x ) * smoothstep( 1.0, 0.988, ruv.x ) *
+               smoothstep( 0.0, 0.010, ruv.y ) * smoothstep( 1.0, 0.990, ruv.y );
 
   // The board axis, carried into reflection UV.
   //
@@ -635,7 +756,16 @@ material.clearcoatRoughness = clamp(
   // anisotropic coat, and it put the measured streak axis 40° off the boards.
   vec4 rTan = vReflCoord + uReflMx * vec4( 0.35, 0.0, 0.0, 0.0 );
   vec2 along = rTan.xy / max( rTan.w, 1e-4 ) - ruv;
-  along = normalize( along + vec2( 1e-7, 1e-7 ) );
+
+  // ...and then into a step of a stated *screen* length.
+  //
+  // A normalised UV direction is not a direction on the screen unless the frame
+  // is square, and 9:19.5 is as far from square as this project gets, so the
+  // offsets have to be taken through the aspect and back. stepUv is one frame
+  // height of travel along the boards; sm is therefore in frame heights and
+  // can be quoted against §2.3's aspect-ratio band directly.
+  vec2 asp = vec2( uReflSize.x / max( uReflSize.y, 1.0 ), 1.0 );
+  vec2 stepUv = normalize( along * asp + vec2( 1e-7, 1e-7 ) ) / asp;
 
   float viewDist = length( vViewPosition );
   float lod0 = clamp( material.roughness * uReflParams.y + viewDist * 0.02,
@@ -644,17 +774,17 @@ material.clearcoatRoughness = clamp(
   // deck maps to distance along this axis in the mirrored image, so the tap
   // that lands on a shoe is near-sharp and the ones a body-length up are a
   // smear — which is exactly §2.4's sharpness falloff, for free.
-  float sm = uReflParams.w * ( 0.25 + material.roughness * 4.0 );
+  float sm = uReflParams.w * ( 0.3 + material.roughness * 3.4 );
 #ifdef WIDE_REFLECTION
   vec3 refl = textureLod( uReflTex, ruv, lod0 ).rgb * 0.34;
-  refl += textureLod( uReflTex, ruv + along * sm, lod0 + 0.85 ).rgb * 0.19;
-  refl += textureLod( uReflTex, ruv - along * sm, lod0 + 0.85 ).rgb * 0.19;
-  refl += textureLod( uReflTex, ruv + along * sm * 2.4, lod0 + 1.9 ).rgb * 0.14;
-  refl += textureLod( uReflTex, ruv - along * sm * 2.4, lod0 + 1.9 ).rgb * 0.14;
+  refl += textureLod( uReflTex, ruv + stepUv * sm, lod0 + 0.85 ).rgb * 0.19;
+  refl += textureLod( uReflTex, ruv - stepUv * sm, lod0 + 0.85 ).rgb * 0.19;
+  refl += textureLod( uReflTex, ruv + stepUv * sm * 2.4, lod0 + 1.9 ).rgb * 0.14;
+  refl += textureLod( uReflTex, ruv - stepUv * sm * 2.4, lod0 + 1.9 ).rgb * 0.14;
 #else
   vec3 refl = textureLod( uReflTex, ruv, lod0 ).rgb * 0.46;
-  refl += textureLod( uReflTex, ruv + along * sm * 1.6, lod0 + 1.4 ).rgb * 0.27;
-  refl += textureLod( uReflTex, ruv - along * sm * 1.6, lod0 + 1.4 ).rgb * 0.27;
+  refl += textureLod( uReflTex, ruv + stepUv * sm * 1.6, lod0 + 1.4 ).rgb * 0.27;
+  refl += textureLod( uReflTex, ruv - stepUv * sm * 1.6, lod0 + 1.4 ).rgb * 0.27;
 #endif
   // A varnish reflection carries the *structure* of the room — dark bowl,
   // bright ceiling — not the crowd's shirt colours, which at this blur would
@@ -665,11 +795,21 @@ material.clearcoatRoughness = clamp(
   // toward neutral in the hot core for the same reason as the direct lobe.
   refl *= mix( uCoat, vec3( 1.0 ), saturate( reflLum * 2.1 ) );
 
-  // Schlick against a real dielectric coat, not a remapped one. This is the
-  // grazing-angle gain §2.3 asks for: ~4% face-on, climbing at the horizon.
-  float fres = pow( 1.0 - saturate( dot( geometryNormal, geometryViewDir ) ), 5.0 );
+  // Schlick against a real dielectric coat, not a remapped one — but against a
+  // *stack* of them. A refinished NBA deck carries several poured coats, so
+  // there are several interfaces in series and the aggregate reflectance climbs
+  // earlier than a single-surface Schlick predicts. The exponent is the only
+  // freedom taken and it buys the thing §2.3 names: at the bottom of a FLOOR
+  // frame the view sits 67° off the normal, where an exponent of 5 returns 12%
+  // and 4.2 returns 16%.
+  float fres = pow( 1.0 - saturate( dot( geometryNormal, geometryViewDir ) ), 4.2 );
   float F = 0.04 + 0.96 * fres;
-  float k = uReflParams.x * edge * valid * ( 1.0 - smoothstep( 14.0, 34.0, viewDist ) );
+  // Out to sixty metres, not fourteen. §2.4 asks the hardwood in the *top* half
+  // of a FLOOR frame to carry a dark band from the far stands and a bright one
+  // from the ceiling banks; the far band measured sd 14.5 and 6.5% saturation —
+  // a featureless bright strip — because the tap had already faded out by the
+  // free-throw line.
+  float k = uReflParams.x * edge * valid * ( 1.0 - smoothstep( 26.0, 60.0, viewDist ) );
 
   // The planar tap *stands in for part of the environment probe*, not for the
   // frame.
@@ -701,7 +841,7 @@ material.clearcoatRoughness = clamp(
 {
   float coatL = dot( outgoingLight, vec3( 0.2126, 0.7152, 0.0722 ) );
   outgoingLight = mix( outgoingLight, vec3( coatL ),
-                       uBoard.w * smoothstep( 0.17, 0.52, coatL ) );
+                       uBoard.w * smoothstep( 0.35, 0.95, coatL ) );
 }
 #include <opaque_fragment>`,
       );
@@ -726,6 +866,7 @@ material.clearcoatRoughness = clamp(
     rt.texture.name = 'court.reflection';
     this.reflectionRT = rt;
     this.uniforms.uReflTex.value = rt.texture;
+    this.uniforms.uReflSize.value.set(w, h);
   }
 
   /**

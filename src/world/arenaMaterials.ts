@@ -80,7 +80,7 @@ export function bakeRibbonStrip(width = 2048, height = 64): CanvasTexture {
   const words = ['BALLIN', 'COURTSIDE', 'HOME OF THE', 'TIP-OFF', 'SEASON PASS', 'DOWNTOWN'];
   // Mid-value team colours only. Anything darker than the floor above is a dead
   // panel, and a dead panel on a board that wraps the whole bowl is a gap.
-  const palette = ['#2d5cc8', '#c8452b', '#e8a32c', '#3b6fd4', '#1c8f6a', '#8f4bbd', '#a8552a'];
+  const palette = ['#2d5cc8', '#c8452b', '#e8a32c', '#3b6fd4', '#1c8f6a', '#8c3326', '#b06a2e'];
 
   let x = 0;
   let w = 0;
@@ -377,6 +377,62 @@ export function makeLedMaterial(o: LedOptions): ShaderMaterial {
     `,
   });
   mat.name = 'arena.led';
+  return mat;
+}
+
+/**
+ * The pool of board light on the apron.
+ *
+ * §6.2 requires the boards to cast coloured light onto the apron, and §1.3 wants
+ * that as a 5–15% saturation team-colour cast — visible as a hue shift between
+ * the apron nearest the boards and the apron under the basket. This is a
+ * light-cookie decal rather than a punctual light, and that is a measured
+ * decision, not a shortcut: a point light at board height (0.8–1.1 m) over a
+ * roughness-0.1 clear coat is a mirror source. Putting one on each sideline
+ * painted a 40 m specular streak straight down the middle of the hardwood and
+ * took the floor from a 96 mean to 162 — see `shots/crowd-r1/gameplay.png`.
+ * `Lighting.ts` reaches the same conclusion in its header, which is why the warm
+ * bounce there is a `HemisphereLight` and `bounce` is deliberately empty.
+ *
+ * A decal has the locality a punctual light has and none of the specular.
+ * Additive into the HDR buffer, so it composites before the tone curve exactly
+ * as real added irradiance would.
+ */
+export function makeApronSpillMaterial(): ShaderMaterial {
+  const mat = new ShaderMaterial({
+    uniforms: {
+      uColor: { value: new Color(0.10, 0.30, 0.86) },
+      uStrength: { value: 0.05 },
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: AdditiveBlending,
+    vertexShader: /* glsl */ `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      #include <common>
+      uniform vec3 uColor;
+      uniform float uStrength;
+      varying vec2 vUv;
+      void main() {
+        // Falls off with distance from the board, and dies before the ends so
+        // the pool never reads as a rectangle painted on the floor.
+        float depth = pow( 1.0 - clamp( vUv.y, 0.0, 1.0 ), 2.4 );
+        float ends = smoothstep( 0.0, 0.10, vUv.x ) * smoothstep( 1.0, 0.90, vUv.x );
+        // Panels differ along the board, so the pool is not perfectly even.
+        float mod_ = 0.80 + 0.20 * sin( vUv.x * 34.0 ) * sin( vUv.x * 11.0 + 1.7 );
+        gl_FragColor = vec4( uColor * ( uStrength * depth * ends * mod_ ), 1.0 );
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+  mat.name = 'arena.apronSpill';
   return mat;
 }
 

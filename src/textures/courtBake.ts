@@ -225,9 +225,18 @@ export function bakeCourt(height: number, detailSize: number, logoSize = 512): C
       // ~34° / 44% / 78°, i.e. 0.38 linear reflectance instead of 0.17. The
       // specular is held down to match (`uSpec` in Court.ts) so the two are not
       // fighting for the same stops.
-      let r = 0.768;
-      let g = 0.648;
-      let b = 0.515;
+      //
+      // Round 5 moves the *warmth* here as well. §8.3's highlight check samples
+      // the top fifth of the range, which on a portrait frame is the hardwood's
+      // own specular, so a tinted coat reads as a grade failure (12.7 against a
+      // 4–12 band) while the maple underneath still measures near-grey. The coat
+      // is now essentially neutral and this swatch carries the hue instead:
+      // HSV 33° / 40.5% / 79%, against 31.5° / 33% / 77%. Luminance is
+      // deliberately unchanged (0.664 → 0.660 linear) so §1.1's court band does
+      // not move — this is chroma, not exposure.
+      let r = 0.79;
+      let g = 0.645;
+      let b = 0.47;
 
       // Slow stain drift over metres.
       const drift = fbm2(x * 0.055, z * 0.075, 3, 2, 0.5, 11) - 0.5;
@@ -447,8 +456,15 @@ function bakeCentreLogo(S: number, rng: () => number): HTMLCanvasElement {
   // sheet. So the blues are mixed lighter as well as flatter: at 44–46%
   // saturation and half a stop up they land in the low 60s post-grade with
   // room for the grade to move underneath them.
-  const navy = '#4d6786';
-  const navyDeep = '#43597a';
+  //
+  // Round 5 lifts both by ~22% in value and leaves the chroma alone. The mark
+  // measured mean luminance 61 against a surrounding floor of 120–180 — 1.0 to
+  // 1.6 stops under the wood it is painted on, which is a hole in the floor
+  // rather than a graphic under the same coat. Saturation is unchanged at ~42%
+  // on the swatch (36.7% measured in-frame, against §2.5's 72% ceiling), so
+  // this buys value without spending any of the headroom that matters.
+  const navy = '#628bb4';
+  const navyDeep = '#57809f';
   const gold = '#b28a4c';
   const brick = '#a86647';
   const cream = '#eadfc6';
@@ -593,8 +609,14 @@ function bakeCentreLogo(S: number, rng: () => number): HTMLCanvasElement {
   arc('source-atop', 520, 0.62, 0.07, 0.28, '#b8ac93');
   // Rubber transferred off soles: darker, tighter, dead centre.
   arc('source-atop', 230, 0.45, 0.06, 0.21, '#2a2320');
-  // Bare wood, only in the worst of it.
-  arc('destination-out', 210, 0.4, 0.09, 0.42, '#000');
+  // Bare wood, only in the worst of it. Carried harder than it was: the mark
+  // measured 1.35 stops under the hardwood beside it, and a centre logo that
+  // reads as a hole in the floor is §2.5's named tell in the opposite
+  // direction. Letting more maple back through raises the mark's mean without
+  // touching its pigment — which is the honest way round, because §2.5's
+  // saturation ceiling is the constraint on the pigment and the *wear* is
+  // something the round-4 mark did not have enough of anyway.
+  arc('destination-out', 300, 0.4, 0.11, 0.5, '#000');
 
   // A couple of long drag scars right across the mark.
   ctx.globalCompositeOperation = 'destination-out';

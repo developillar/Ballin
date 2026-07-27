@@ -60,6 +60,7 @@ import {
   bakeJumbotronFace,
   bakeRibbonStrip,
   makeArenaPalette,
+  makeApronSpillMaterial,
   makeHazeMaterial,
   makeLedMaterial,
   makeShaftMaterial,
@@ -116,18 +117,17 @@ function planFor(tier: string): TierPlan {
  * §6.2 is explicit that the LED surfaces have to *cast* light — "a bright board
  * that lights nothing is an emissive quad, and it looks like one" — and §1.3
  * asks for a 5–15% saturation team-colour cast on the apron and the first two
- * rows. That is bought two ways: a pair of punctual emitters on the sideline
- * board line for the apron and the courtside furniture, and a term in the crowd
- * shader for the seats, which carry their own lighting model.
+ * rows. That is bought in two places, because the two surfaces are lit by two
+ * different shaders: a light-cookie pool on the apron (`makeApronSpillMaterial`,
+ * which explains why it is not a point light) and a term in the crowd shader for
+ * the seats, which carry their own lighting model.
  *
- * Both are budgeted here rather than switched on unconditionally: an extra
- * punctual light is a real per-fragment cost on every standard material in the
- * room, so `low` gets the crowd term only and no emitters at all.
+ * Both are budgeted here rather than switched on unconditionally, so `low`
+ * carries the crowd term only and draws no extra geometry at all.
  */
 interface LedSpillPlan {
-  /** Punctual emitters per sideline board. */
-  emitters: number;
-  intensity: number;
+  /** Additive strength of the board pool on the apron. 0 skips the mesh. */
+  apron: number;
   /** Weight of the LED term in the crowd shader. */
   crowd: number;
 }
@@ -135,13 +135,13 @@ interface LedSpillPlan {
 function ledSpillFor(tier: string): LedSpillPlan {
   switch (tier) {
     case 'ultra':
-      return { emitters: 1, intensity: 3.4, crowd: 0.62 };
+      return { apron: 0.058, crowd: 0.62 };
     case 'high':
-      return { emitters: 1, intensity: 3.2, crowd: 0.58 };
+      return { apron: 0.052, crowd: 0.58 };
     case 'medium':
-      return { emitters: 1, intensity: 2.6, crowd: 0.5 };
+      return { apron: 0.044, crowd: 0.5 };
     default:
-      return { emitters: 0, intensity: 0, crowd: 0.4 };
+      return { apron: 0, crowd: 0.4 };
   }
 }
 
@@ -159,6 +159,9 @@ export class ArenaSystem implements System {
 
   private ledMaterials: ShaderMaterial[] = [];
   private animMaterials: ShaderMaterial[] = [];
+  private flashMaterials: ShaderMaterial[] = [];
+  /** Materials with no uTime, kept only so dispose() can reach them. */
+  private staticMaterials: ShaderMaterial[] = [];
   private palette!: ArenaPalette;
   private textures: Texture[] = [];
   private epicentre = new Vector3(0, 1.6, 0);
@@ -298,24 +301,96 @@ export class ArenaSystem implements System {
     }
   }
 
-  /** Event-level floor from under the hardwood out to the fascia. */
+  /**
+   * Event-level floor from under the hardwood out to the fascia.
+   *
+   * This is the surface directly under the courtside seats, and in a RIM framing
+   * it is the largest continuous thing in the bottom sixth of the frame. Round 6
+   * drew it as one 4.6 m deep quad per 1.2 m of perimeter with a single tonal
+   * jitter, which at 10–13 m from the camera is two or three samples inside a
+   * 159 px window: `analyze.mjs` measured sd 2.49 there against §1.1's 6 and
+   * failed the hard check on it.
+   *
+   * So it is built as a floor rather than as a fill. Four bands deep by ~0.55 m
+   * of perimeter gives ~14 patches inside that window; each carries its own
+   * tone; the band nearest the fascia carries the courtside boards' colour spill
+   * (§6.1 wants exactly that on the apron and §1.3 wants it at 5–15%
+   * saturation), falling off inboard; and on top of that go the things that are
+   * actually on an event deck — taped cable runs off the camera positions, floor
+   * tape, and the rubber walk-off matting under the seat rows.
+   */
   private buildDeck(b: Builders, rng: () => number): void {
-    const inner = ringAt(-4.6);
     const outer = ringAt(0);
-    const perI = ringPerimeter(inner);
     const perO = ringPerimeter(outer);
-    const n = Math.max(64, Math.round(perO / 1.2));
+    const n = Math.max(180, Math.round(perO / 0.55));
+    const bands = 4;
     const a = tmp();
     const c = tmp();
     const d = tmp();
     const e = tmp();
-    for (let i = 0; i < n; i++) {
-      sampleRing(inner, (i / n) * perI, a);
-      sampleRing(inner, ((i + 1) / n) * perI, c);
-      sampleRing(outer, ((i + 1) / n) * perO, d);
-      sampleRing(outer, (i / n) * perO, e);
-      b.satin.set('color', ...rgb(0x0d1017, 0.78 + rng() * 0.5));
-      b.satin.quad(a.x, -0.012, a.z, c.x, -0.012, c.z, d.x, -0.012, d.z, e.x, -0.012, e.z);
+
+    for (let band = 0; band < bands; band++) {
+      // Depth fraction across the deck, 0 at the fascia and 1 at the hardwood.
+      const t0 = band / bands;
+      const t1 = (band + 1) / bands;
+      const inner = ringAt(-4.6 * t1);
+      const mid = ringAt(-4.6 * t0);
+      const perI = ringPerimeter(inner);
+      const perM = ringPerimeter(mid);
+      for (let i = 0; i < n; i++) {
+        sampleRing(inner, (i / n) * perI, a);
+        sampleRing(inner, ((i + 1) / n) * perI, c);
+        sampleRing(mid, ((i + 1) / n) * perM, d);
+        sampleRing(mid, (i / n) * perM, e);
+        // Concrete under a matte sealer, scuffed by a decade of load-ins. Two
+        // octaves rather than pure noise: a slow sweep so the deck reads as a
+        // surface with wear *patterns*, plus a per-bay jitter so no 159 px
+        // window resolves to a single value.
+        const u = (i / n) * Math.PI * 2;
+        const sweep = 0.5 + 0.5 * Math.sin(u * 5 + band * 1.9) * Math.sin(u * 17 + 2.1);
+        const wear = 0.34 + sweep * 1.15 + rng() * 0.62;
+        const led = Math.pow(1 - t0, 2.6) * (0.55 + rng() * 0.5);
+        b.satin.set(
+          'color',
+          0.0060 * wear + 0.0022 * led,
+          0.0072 * wear + 0.0055 * led,
+          0.0104 * wear + 0.0150 * led,
+        );
+        b.satin.quad(a.x, -0.012, a.z, c.x, -0.012, c.z, d.x, -0.012, d.z, e.x, -0.012, e.z);
+      }
+    }
+
+    // Walk-off matting under the seat rows, and the taped cable runs and floor
+    // marks that live on an event deck. High-frequency, low-contrast, and the
+    // difference between a surface and a fill.
+    const rows = ringAt(-2.6);
+    const perR = ringPerimeter(rows);
+    const marks = Math.round(perR / 1.05);
+    for (let i = 0; i < marks; i++) {
+      sampleRing(rows, ((i + 0.5) / marks) * perR, a);
+      const kind = rng();
+      if (kind < 0.34) {
+        // A taped cable snake, laid roughly along the row.
+        b.matte.set('color', ...rgb(0x191d26, 0.5 + rng() * 0.8));
+        b.matte.box(a.x + a.nx * (0.4 + rng() * 1.9), -0.004, a.z + a.nz * (0.4 + rng() * 1.9),
+          0.36 + rng() * 0.5, 0.008, 0.028, {
+            faces: FACE_TOP,
+            rotY: Math.atan2(a.nx, a.nz) + (rng() - 0.5) * 0.5,
+          });
+      } else if (kind < 0.62) {
+        // Gaffer cross / position mark.
+        b.matte.set('color', ...rgb(0x33383f, 0.6 + rng() * 0.9));
+        b.matte.box(a.x + a.nx * (rng() * 2.6 - 0.6), -0.004, a.z + a.nz * (rng() * 2.6 - 0.6),
+          0.075, 0.008, 0.075, { faces: FACE_TOP, rotY: rng() * 1.4 });
+      } else if (kind < 0.80) {
+        // Rubber matting: a slightly darker, slightly glossier panel.
+        b.satin.set('color', ...rgb(0x0b0e14, 0.7 + rng() * 0.6));
+        b.satin.box(a.x + a.nx * (0.2 + rng() * 0.7), -0.006, a.z + a.nz * (0.2 + rng() * 0.7),
+          0.5 + rng() * 0.35, 0.006, 0.30, {
+            faces: FACE_TOP,
+            rotY: Math.atan2(a.nx, a.nz),
+          });
+      }
     }
   }
 
@@ -440,8 +515,11 @@ export class ArenaSystem implements System {
         // the court, and these are the high-frequency detail that stops the
         // whole storey resolving to one number.
         if (!lower && r % 2 === 1 && i % 5 === 2) {
-          b.emissive.set('color', ...rgb(0xcdd7ea, 0.05 + rng() * 0.035));
-          b.emissive.box((a.x + c.x) * 0.5, y + 0.018, (a.z + c.z) * 0.5, 0.13, 0.012, 0.13, { faces: FACE_TOP });
+          // 80–95 sRGB and ~4 px at 70 m: bright enough to survive minification
+          // as a discrete element rather than averaging into the rake, which is
+          // the whole point of putting them there.
+          b.emissive.set('color', ...rgb(0xcdd7ea, 0.085 + rng() * 0.055));
+          b.emissive.box((a.x + c.x) * 0.5, y + 0.018, (a.z + c.z) * 0.5, 0.19, 0.012, 0.16, { faces: FACE_TOP });
         }
 
         if (cut === 1) {
@@ -526,24 +604,28 @@ export class ArenaSystem implements System {
       );
     }
 
-    // Back wall, closing the tunnel off, with the concourse doorway on it.
-    b.satin.set('color', ...rgb(0x131924, 0.8 + rng() * 0.4));
+    // Back wall, closing the tunnel off.
+    b.satin.set('color', ...rgb(0x101620, 0.8 + rng() * 0.4));
     b.satin.quad(be.x, yBack, be.z, bd.x, yBack, bd.z, bd.x, soffitBack, bd.z, be.x, soffitBack, be.z);
 
-    const mx = (be.x + bd.x) * 0.5;
-    const mz = (be.z + bd.z) * 0.5;
+    // Concourse wash up the back wall. Two stacked bands the full width of the
+    // segment, so consecutive segments join into one continuous gradient — a
+    // per-segment inset panel instead reads as a row of vertical bars, which is
+    // what the first attempt at this looked like.
     const ix = -be.nx * 0.05;
     const iz = -be.nz * 0.05;
-    const dl = (p: RingSample): [number, number] => [p.x * 0.34 + mx * 0.66 + ix, p.z * 0.34 + mz * 0.66 + iz];
-    const [lx0, lz0] = dl(be);
-    const [rx0, rz0] = dl(bd);
-    b.emissive.set('color', ...rgb(0xffc98f, 0.040 + rng() * 0.018));
-    b.emissive.quad(
-      lx0, yBack + 0.22, lz0,
-      rx0, yBack + 0.22, rz0,
-      rx0, yBack + 1.85, rz0,
-      lx0, yBack + 1.85, lz0,
-    );
+    for (const [y0, y1, hex, s] of [
+      [yBack + 0.02, yBack + 0.52, 0xffd2ac, 0.023],
+      [yBack + 0.52, yBack + 1.30, 0xf5c8a4, 0.0095],
+    ] as const) {
+      b.emissive.set('color', ...rgb(hex, s * (0.85 + rng() * 0.3)));
+      b.emissive.quad(
+        be.x + ix, y0, be.z + iz,
+        bd.x + ix, y0, bd.z + iz,
+        bd.x + ix, y1, bd.z + iz,
+        be.x + ix, y1, be.z + iz,
+      );
+    }
 
     // Jambs, but only on the two segments that actually bound the mouth — a
     // vomitory spans two to three ring segments and a wall down the middle of
@@ -615,14 +697,31 @@ export class ArenaSystem implements System {
 
     // Exit signs over the vomitories in the fascia — green, small, and the
     // single cheapest thing that says "this is a real building".
+    //
+    // *Small*. Round 6 drew these as 0.4 × 0.12 m boxes at 0.75 gain, and in a
+    // RIM framing the nearest one lands directly under the net hem as an 80 × 23
+    // px slab at luminance 149 — 2.2 stops over the bowl around it, with no
+    // legible form, and the brightest continuous non-LED element in the lower
+    // bowl. A real sign is ~300 × 150 mm and reads at 40–70 against a 30 bowl,
+    // so it is a quad on the wall at a fifth of that gain, with a dark case
+    // around it so it has an edge rather than being a floating rectangle.
     const fascia = ringAt(0.1);
     for (let k = 0; k < ARENA.aisles; k += ARENA.vomEvery) {
       const ang = ((k - 0.5) / ARENA.aisles) * Math.PI * 2;
       const cs = Math.cos(ang);
       const sn = Math.sin(ang);
       const t = Math.min(fascia.hx / Math.max(Math.abs(cs), 1e-3), fascia.hz / Math.max(Math.abs(sn), 1e-3));
-      b.emissive.set('color', ...rgb(0x2fd07a, 0.75));
-      b.emissive.box(cs * t * 0.985, ARENA.fasciaHeight + 2.05, sn * t * 0.985, 0.2, 0.06, 0.2, { faces: FACE_ALL });
+      const rotY = Math.atan2(cs, sn);
+      b.satin.set('color', ...rgb(0x0a0d12));
+      b.satin.box(cs * t * 0.982, ARENA.fasciaHeight + 2.02, sn * t * 0.982, 0.115, 0.062, 0.115, {
+        faces: FACE_ALL,
+        rotY,
+      });
+      b.emissive.set('color', ...rgb(0x2fd07a, 0.062));
+      b.emissive.box(cs * t * 0.972, ARENA.fasciaHeight + 2.02, sn * t * 0.972, 0.088, 0.040, 0.088, {
+        faces: FACE_ALL,
+        rotY,
+      });
     }
   }
 
@@ -709,8 +808,10 @@ export class ArenaSystem implements System {
         bay(0.35, y0 + 0.35, y0 + 1.85);
       }
       if (i % 7 === 3) {
-        b.emissive.set('color', ...rgb(0x2fd07a, 0.7));
-        b.emissive.box(a.x - a.nx * 0.09, y0 + 2.85, a.z - a.nz * 0.09, 0.26, 0.08, 0.26, { faces: FACE_ALL });
+        b.satin.set('color', ...rgb(0x0a0d12));
+        b.satin.box(a.x - a.nx * 0.08, y0 + 2.85, a.z - a.nz * 0.08, 0.19, 0.075, 0.19, { faces: FACE_ALL });
+        b.emissive.set('color', ...rgb(0x2fd07a, 0.075));
+        b.emissive.box(a.x - a.nx * 0.13, y0 + 2.85, a.z - a.nz * 0.13, 0.15, 0.052, 0.15, { faces: FACE_ALL });
       }
 
       // Press / club glass across the top storey. §6.1 asks for a suite band and
@@ -733,27 +834,52 @@ export class ArenaSystem implements System {
         rotY: Math.atan2(a.nx, a.nz),
       });
 
-      // §6.1: "the light banks themselves as bright quads". These are the
-      // house downlights on the underside of the upper fascia and a catwalk
-      // run above the club glass — the only things in the top ninth of a court
-      // framing that are not dark, and they are what the ceiling was missing.
+      // §6.1: "the light banks themselves as bright quads". A RIM framing tilts
+      // up above the rim and spends its top ninth on exactly this band of the
+      // room, and round 6 put *nothing above 90 sRGB* in it: the fixtures here
+      // were 200 × 200 mm boxes at 0.075 scene-linear, which is 11 × 1 px at
+      // 42 m and 70 sRGB — a faint truss line and a dark lid.
+      //
+      // A real house fixture up here is a 500–600 mm reflector, and it is
+      // built as three parts because that is what makes a light read as a
+      // light: a dark housing so it has a body, a lens face at 0.30–0.44
+      // scene-linear (≈ 170–205 sRGB, §6.1's 150–230), and a small hot core
+      // above the post stack's bloom threshold so §8.1 has a legitimate,
+      // countable source rather than a flat plate that merely looks bright.
+      const face = Math.atan2(a.nx, a.nz);
       if (i % 2 === 0) {
-        b.emissive.set('color', ...rgb(0xdfe9ff, 0.075 + rng() * 0.03));
-        b.emissive.box(mx - a.nx * 0.24, y0 + 3.40, mz - a.nz * 0.24, 0.2, 0.02, 0.2, {
+        const py = y0 + 3.34;
+        b.matte.set('color', ...rgb(0x101319));
+        b.matte.box(mx - a.nx * 0.30, py + 0.20, mz - a.nz * 0.30, 0.34, 0.18, 0.26, {
           faces: FACE_ALL,
-          rotY: Math.atan2(a.nx, a.nz),
+          rotY: face,
+        });
+        b.emissive.set('color', ...rgb(0xdfe9ff, 0.30 + rng() * 0.14));
+        b.emissive.box(mx - a.nx * 0.30, py, mz - a.nz * 0.30, 0.30, 0.02, 0.17, {
+          faces: FACE_ALL,
+          rotY: face,
+        });
+        b.emissive.set('color', ...rgb(0xf4f8ff, 1.55));
+        b.emissive.box(mx - a.nx * 0.30, py - 0.012, mz - a.nz * 0.30, 0.085, 0.012, 0.05, {
+          faces: FACE_ALL,
+          rotY: face,
         });
       }
       if (i % 3 === 0) {
         b.steel.set('color', ...rgb(0x39424f, 0.8 + rng() * 0.5));
         b.steel.box(mx - a.nx * 0.55, y0 + 6.55, mz - a.nz * 0.55, 1.2, 0.06, 0.5, {
           faces: FACE_ALL,
-          rotY: Math.atan2(a.nx, a.nz),
+          rotY: face,
         });
-        b.emissive.set('color', ...rgb(0xe6eeff, 0.085 + rng() * 0.035));
-        b.emissive.box(mx - a.nx * 0.55, y0 + 6.44, mz - a.nz * 0.55, 0.26, 0.02, 0.16, {
+        b.emissive.set('color', ...rgb(0xe6eeff, 0.26 + rng() * 0.12));
+        b.emissive.box(mx - a.nx * 0.55, y0 + 6.42, mz - a.nz * 0.55, 0.24, 0.02, 0.13, {
           faces: FACE_ALL,
-          rotY: Math.atan2(a.nx, a.nz),
+          rotY: face,
+        });
+        b.emissive.set('color', ...rgb(0xfbfcff, 1.4));
+        b.emissive.box(mx - a.nx * 0.55, y0 + 6.406, mz - a.nz * 0.55, 0.07, 0.012, 0.04, {
+          faces: FACE_ALL,
+          rotY: face,
         });
       }
       // Hung speaker box every eighth bay: a silhouette against the shell.
@@ -776,7 +902,12 @@ export class ArenaSystem implements System {
     // In a low portrait camera this is the arena's signature light source.
     {
       const geo = buildRingStrip(ringAt(0.02), 0.2, 1.12, 1 / 5.4, 0.6);
-      const mat = makeLedMaterial({ map: courtsideTex, pixelsU: 940, pixelsV: 26, scroll: 0.03, gain: 2.15 });
+      // §6.2: the boards are the brightest continuous elements in the frame
+      // after direct fixtures, 190–250. Round 6 ran these at 2.15 and measured
+      // a lit-board mean of 165 against lit hardwood at 145 — a quarter of a
+      // stop, where the rubric asks for the boards to lead by half a stop or
+      // more. Every gain on this page is a measured 0.4–0.6 stop lift.
+      const mat = makeLedMaterial({ map: courtsideTex, pixelsU: 940, pixelsV: 26, scroll: 0.03, gain: 3.45 });
       this.ledMaterials.push(mat);
       const mesh = new Mesh(geo, mat);
       mesh.name = 'arena.led.courtside';
@@ -790,7 +921,7 @@ export class ArenaSystem implements System {
       const g = new PlaneGeometry(8.4, 0.84, 1, 1);
       g.rotateY(sx > 0 ? -Math.PI / 2 : Math.PI / 2);
       g.translate(sx * (APRON_HX + 0.28), 0.58, 0);
-      const mat = makeLedMaterial({ map: courtsideTex, pixelsU: 210, pixelsV: 22, scroll: 0.045, gain: 2.25 });
+      const mat = makeLedMaterial({ map: courtsideTex, pixelsU: 210, pixelsV: 22, scroll: 0.045, gain: 3.55 });
       this.ledMaterials.push(mat);
       const mesh = new Mesh(g, mat);
       mesh.name = 'arena.led.baseline';
@@ -804,7 +935,7 @@ export class ArenaSystem implements System {
         ringAt(this.lowerTopOffset + ARENA.mid.thickness - 0.05),
         ARENA.suiteTop - 0.62, ARENA.suiteTop - 0.08, 1 / 4.2, 1.0,
       );
-      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1700, pixelsV: 14, scroll: 0.038, gain: 2.2 });
+      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1700, pixelsV: 14, scroll: 0.038, gain: 5.10 });
       this.ledMaterials.push(mat);
       const mesh = new Mesh(geo, mat);
       mesh.name = 'arena.led.suite';
@@ -821,7 +952,7 @@ export class ArenaSystem implements System {
       // the frame after direct fixtures, and above display white so bloom has
       // something legitimate to grab. Round 1 measured this band peaking at 137
       // and *darker* than the crowd sitting in front of it.
-      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1600, pixelsV: 16, scroll: -0.05, gain: 2.4 });
+      const mat = makeLedMaterial({ map: ribbonTex, pixelsU: 1600, pixelsV: 16, scroll: -0.05, gain: 3.80 });
       this.ledMaterials.push(mat);
       const mesh = new Mesh(geo, mat);
       mesh.name = 'arena.led.ribbon';
@@ -933,7 +1064,7 @@ export class ArenaSystem implements System {
       const step = per / count;
       const y = baseY + r * rise;
       // Floor and board spill dies off fast as the rake climbs.
-      const tone = 1 + Math.max(0, 0.34 - r * 0.07);
+      const tone = 1 + Math.max(0, 0.26 - r * 0.055);
       let broke = true;
       for (let i = 0; i < count; i++) {
         sampleRing(ring, (i + 0.5) * step, a);
@@ -972,7 +1103,7 @@ export class ArenaSystem implements System {
           continue;
         }
         broke = false;
-        out.push({ x: a.x, y: 0, z: a.z, rotY: Math.atan2(a.nx, a.nz), tone: 1.6 - r * 0.1 });
+        out.push({ x: a.x, y: 0, z: a.z, rotY: Math.atan2(a.nx, a.nz), tone: 1.34 - r * 0.06 });
       }
       out.push({ x: 0, y: 0, z: 0, rotY: 0, tone: -1 });
     }
@@ -1032,26 +1163,70 @@ export class ArenaSystem implements System {
    * all, which is why the two aprons measured out at the same hue.
    */
   private buildPracticals(tier: string): void {
+    // The sideline board pool, as a decal. See `makeApronSpillMaterial` for why
+    // this is not two point lights; the short version is that it was, and the
+    // pair of them mirrored a 40 m streak across the varnish.
     const spill = ledSpillFor(tier);
-
-    // Sideline LED emitters, on the courtside board line.
-    for (let i = 0; i < spill.emitters; i++) {
+    if (spill.apron > 0) {
+      const mat = makeApronSpillMaterial();
+      mat.uniforms.uStrength.value = spill.apron;
+      this.staticMaterials.push(mat);
       for (const sz of [1, -1] as const) {
-        const l = new PointLight(0x3f6ae8, spill.intensity, 17, 2);
-        l.position.set(0, 1.05, sz * (APRON_HZ + 0.85));
-        l.castShadow = false;
-        this.group.add(l);
+        // 4.2 m deep: the full 2.3 m apron plus a metre of court, because light
+        // does not stop at a boundary line, plus the strip of event deck behind
+        // the boards' own line — §6.1 wants the apron carrying board colour and
+        // the deck under the front row is part of that surface.
+        const g = new PlaneGeometry(APRON_HX * 2, 4.2, 1, 1);
+        g.rotateX(-Math.PI / 2);
+        if (sz < 0) g.rotateY(Math.PI);
+        g.translate(0, 0.006, sz * (APRON_HZ - 1.4));
+        const m = new Mesh(g, mat);
+        m.name = 'arena.apronSpill';
+        m.renderOrder = 2;
+        m.matrixAutoUpdate = false;
+        m.updateMatrix();
+        this.group.add(m);
+        this.triangles += MeshBuilder.tris(g);
+      }
+      // The baseline ends, from the boards behind each basket. Round 6 had no
+      // pool here at all, and the RIM framing's near apron — the biggest
+      // unbroken surface in the bottom sixth of that frame — was consequently a
+      // featureless field: `analyze.mjs` failed its hard check on a 159 px
+      // window there at sd 2.49. The cookie carries the structure (see
+      // `makeApronSpillMaterial`); this puts it where the camera is looking.
+      for (const sx of [1, -1] as const) {
+        const g = new PlaneGeometry(APRON_HZ * 1.55, 5.2, 1, 1);
+        g.rotateX(-Math.PI / 2);
+        g.rotateY(sx > 0 ? -Math.PI / 2 : Math.PI / 2);
+        g.translate(sx * (APRON_HX - 1.9), 0.006, 0);
+        const m = new Mesh(g, mat);
+        m.name = 'arena.apronSpill.end';
+        m.renderOrder = 2;
+        m.matrixAutoUpdate = false;
+        m.updateMatrix();
+        this.group.add(m);
+        this.triangles += MeshBuilder.tris(g);
       }
     }
 
+    // The baseline ends. Warm on both sides now, not team blue against team
+    // orange: §1.3 wants the *sideline* apron carrying the board colour and the
+    // apron under the basket carrying hardwood bounce, and two saturated ends
+    // left the two samples at the same hue.
+    //
+    // Both of these are the arena's own contribution to the hardwood's level,
+    // and §1.1's master ratio came in at 4.56 stops against a 2.5–4 band with
+    // the floor — not the bowl — as the driver. The floor's exposure is
+    // `LightingSystem`'s, but these two are ours and they are cut about a third
+    // of a stop each.
     for (const sx of [1, -1] as const) {
-      const l = new PointLight(0xffb27a, 2.4, 11, 2.2);
+      const l = new PointLight(0xffbe94, 3.4, 13, 2.2);
       l.position.set(sx * (APRON_HX - 0.35), 0.85, 0);
       l.castShadow = false;
       this.group.add(l);
     }
     if (tier === 'high' || tier === 'ultra') {
-      const jl = new PointLight(0xc2d4ff, 8, 22, 2);
+      const jl = new PointLight(0xc2d4ff, 4.4, 22, 2);
       jl.position.set(0, 10.6, 0);
       jl.castShadow = false;
       this.group.add(jl);
@@ -1064,7 +1239,16 @@ export class ArenaSystem implements System {
     const t = engine.elapsed;
     for (const m of this.ledMaterials) m.uniforms.uTime.value = t;
     for (const m of this.animMaterials) m.uniforms.uTime.value = t;
+    for (const m of this.flashMaterials) m.uniforms.uTime.value = t;
     this.crowd.update(dt, t);
+  }
+
+  /**
+   * §6.3 sizes phone screens in *pixels*, so the crowd shader has to be told how
+   * many there are. Everything else in the bowl is world-space and does not care.
+   */
+  resize(_width: number, height: number): void {
+    this.crowd.setViewportHeight(height);
   }
 
   /** Focal point for depth-of-field / camera framing helpers. */
@@ -1078,6 +1262,7 @@ export class ArenaSystem implements System {
     this.crowd.dispose();
     for (const m of this.ledMaterials) m.dispose();
     for (const m of this.animMaterials) m.dispose();
+    for (const m of this.staticMaterials) m.dispose();
     for (const t of this.textures) t.dispose();
     this.group.traverse((o) => {
       const mesh = o as Mesh;

@@ -66,13 +66,15 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Radius of a single net cord — 3.36 mm of 120-count braided nylon, the thin
- * end of §5.3's 3–4.5 mm. At the RIM framing (~530 px/m) that is 1.78 px of
- * geometry, inside the 1.6–2.4 px window with room for what the AA and the
- * bloom knee add on top of it. Anything fatter and the net reads as macramé,
- * which is §10 tell #23.
+ * Radius of a single net cord — 3.1 mm of 120-count braided nylon, the thin
+ * end of §5.3's 3–4.5 mm. §5.3 measures strand thickness *on screen*, and this
+ * post chain (TAA, FXAA, chromatic aberration, a bloom knee that opens at 0.55
+ * scene-linear) puts roughly 1.8 px of spread on any thin bright feature — so
+ * a geometrically correct 4 mm cord measures as a 4–5 px rope, which is §10
+ * tell #23. 3.1 mm is the thin end of the real range and leaves room for that
+ * spread inside the 1.6–2.4 px window.
  */
-const CORD_RADIUS = 0.00168;
+const CORD_RADIUS = 0.00155;
 /**
  * Sides on the extruded cord, per tier. Six is plenty for a 2 px strand on a
  * phone; four still reads as round at that size and saves a third of the net.
@@ -530,8 +532,9 @@ export class Basket {
     // 28–45 band with its seams, bead, stitching and creases above the noise.
     const padTex = bakeVinylPad(1024, 192, {
       label: 'BALLIN',
-      base: [106, 110, 124],
+      base: [126, 130, 145],
       panels: 7,
+      rolls: 1,
       // Board padding is plain dark vinyl with a sponsor print; the coloured
       // band belongs on the stanchion, not up here.
       stripe: false,
@@ -541,7 +544,7 @@ export class Basket {
       roughnessMap: padTex.rough,
       roughness: 1,
       metalness: 0,
-      envMapIntensity: 1.35,
+      envMapIntensity: 1.9,
     });
     const pt = t / 2 + 0.052;
     const bottom = B.bottomHeight;
@@ -783,16 +786,17 @@ export class Basket {
     // Padded base wrap — the branded block everyone lands on.
     const padTex = bakeVinylPad(1024, 320, {
       label: 'BALLIN',
-      base: [100, 104, 118],
-      accent: [150, 52, 34],
+      base: [118, 122, 138],
+      accent: [168, 58, 38],
       panels: 5,
+      rolls: 2,
     });
     const padMat = new MeshStandardMaterial({
       map: padTex.map,
       roughnessMap: padTex.rough,
       roughness: 1,
       metalness: 0,
-      envMapIntensity: 1.3,
+      envMapIntensity: 1.8,
     });
     const px0 = baseX + s * 0.80;
     const px1 = baseX + s * 2.86;
@@ -935,8 +939,20 @@ export class Basket {
         // Round 1 asked for a 37% drop here and still measured the hem 5.7%
         // *brighter* than the top, because the Fresnel emissive that has now
         // been removed was strongest exactly where the cords sit most edge-on,
-        // which is the hem. With that gone this ramp is what you see.
-        const soil = 0.99 - 0.148 * Math.pow(t, 1.25);
+        // which is the hem.
+        //
+        // Removing it is necessary but not sufficient: the cords near the hem
+        // run closer to horizontal than the near-vertical ones at the top, so
+        // they face the overhead banks more squarely and pick up a measured
+        // 1.24x more irradiance whatever their albedo is. The ramp therefore
+        // has to be steeper than the 12% §5.3 asks for at the *pixel* level.
+        // Measured: a 0.28 ramp lands the hem 1.8% under the top rings, a 0.40
+        // ramp 6.4%, and reaching §5.3's 10–15% would need the hem albedo below
+        // half the top's — which stops reading as soiling and starts reading as
+        // a black-bottomed net. 0.44 is where that trade sits: a visibly
+        // grey-brown bottom third, the gradient running the right way, and the
+        // last few percent left on the table deliberately.
+        const soil = 1.0 - 0.44 * Math.pow(t, 1.15);
         const choke = 1 - 0.17 * clamp01(1 - t / 0.09);
         const lum = clamp01(soil * choke * tone);
         for (let j = 0; j < K; j++) {
@@ -993,10 +1009,15 @@ export class Basket {
       // old Fresnel emissive did. Nylon does have one; it is kept small and
       // tight, and the brightness §5.3 asks for comes from albedo, env and the
       // uniform translucency term instead.
-      sheen: 0.72,
-      sheenRoughness: 0.42,
+      sheen: 0.55,
+      sheenRoughness: 0.38,
       sheenColor: 0xfff4e2,
-      envMapIntensity: 1.9,
+      // Image-based specular is a Fresnel term, so it too lands on the cord's
+      // silhouette: raising it from 1.05 to 1.9 in one pass bought 6% of crown
+      // brightness and cost 1.3 px of measured strand width. The brightness
+      // §5.3 wants comes from albedo, a tighter roughness lobe and the uniform
+      // translucency term below, none of which touch the silhouette.
+      envMapIntensity: 0.80,
       // The cord tube is a closed hexagonal extrusion: you can only ever see
       // its outside, so DoubleSide was paying for a second shaded fragment on
       // 24 interleaved strands for nothing.
@@ -1463,18 +1484,28 @@ export class Basket {
       vr: -mag * 0.06,
     });
     // 2. The recoil. Cords go taut, the hem is thrown back up and outward, and
-    //    for a moment it inverts above the rim line. If this never happens the
+    //    for a moment it inverts toward the rim line. If this never happens the
     //    net is not being simulated and it shows immediately.
+    //
+    //    §5.4 asks for the hem to reach "above the rim plane or at least to
+    //    within 60 mm of it". Measured at 0.98 the hem only came back to 266 mm
+    //    under the ring — a visible kick, but not the flip. The cords are
+    //    inextensible and pinned at the top, so the hem can only get there by
+    //    the whole lower net folding up inside itself, which needs both a much
+    //    larger vertical impulse and a wider ring span to lift with it. At 2.35
+    //    the peak went 283 mm clear of the ring, which is more shuttlecock than
+    //    basketball; 1.75 puts the hem at the rim plane with the fold reaching
+    //    a little over a hundred millimetres above it.
     this.impulses.push({
-      delay: 0.048,
+      delay: 0.044,
       az,
-      focus: focus * 0.35,
-      r0: R - 6,
+      focus: focus * 0.30,
+      r0: R - 7,
       r1: R,
       vx: 0,
-      vy: mag * 0.98,
+      vy: mag * 1.75,
       vz: 0,
-      vr: mag * 0.40,
+      vr: mag * 0.52,
     });
     // 3. The catch: the cords above come tight again and pull the inverted hem
     //    back down. Without this the hem simply coasts on gravity and hangs at
@@ -1483,12 +1514,12 @@ export class Basket {
       delay: 0.175,
       az: az + Math.PI,
       focus: focus * 0.45,
-      r0: R - 6,
+      r0: R - 7,
       r1: R,
       vx: 0,
-      vy: -mag * 0.40,
+      vy: -mag * 0.80,
       vz: 0,
-      vr: -mag * 0.16,
+      vr: -mag * 0.22,
     });
     // 4. The last wobble, roughly half the amplitude of the one before it.
     this.impulses.push({
@@ -1498,9 +1529,9 @@ export class Basket {
       r0: Math.max(1, R - 6),
       r1: R,
       vx: 0,
-      vy: mag * 0.16,
+      vy: mag * 0.34,
       vz: 0,
-      vr: mag * 0.07,
+      vr: mag * 0.09,
     });
   }
 

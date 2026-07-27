@@ -51,9 +51,20 @@
  * **The bloom threshold.** `LightingSystem.grade` publishes the rig's
  * scene-linear levels precisely so this file does not have to guess: hardwood at
  * ~0.19, the hottest varnish streak and sweat specular near 0.9, LED ribbon and
- * fixture pods at 1.7. Thresholding at the published figure keeps the bloom
- * sources countable and leaves lit hardwood alone, which is the explicit test in
- * §8.1.
+ * fixture pods at 1.7. The threshold itself is *derived from the exposure* —
+ * §8.1 states the criterion as a multiple of display white and display white is
+ * `1 / exposure` in this buffer — so the relationship survives the exposure
+ * moving. That keeps the bloom sources countable and leaves lit hardwood alone,
+ * which is the explicit test in §8.1.
+ *
+ * **The blur budget is one number.** DOF, camera motion blur and the TAA history
+ * resample all widen an edge, and until round 3 each was sized as though it were
+ * the only one — a stack configured for a 9 ref-px far-field CoC was delivering
+ * three to four times that on real edges. `RF.dofFarCoc` is now the budget for
+ * all three: the motion-blur cap fits inside it, the TAA history is fetched with
+ * a Catmull-Rom kernel so accumulation is not a per-frame low-pass, and both the
+ * DOF gather and the motion blur return the source untouched below their
+ * respective sub-pixel thresholds.
  *
  * Owned by the post-processing agent. Files: this, and `src/render/post*.ts`.
  */
@@ -69,7 +80,7 @@ import {
   makeTarget,
 } from './postPasses';
 import { makeAOBlurPass, makeAOPass } from './postAO';
-import { BloomChain } from './postBloom';
+import { BLOOM_KNEE_FRACTION, BloomChain } from './postBloom';
 import { makeResolvePass } from './postResolve';
 import { makeTaaPass, haltonSequence } from './postTaa';
 import { makeDofPass } from './postDof';
@@ -103,23 +114,77 @@ const RF = {
    * at use. Both sit at the low end of their bands on purpose: the bowl still
    * has to read as architecture (§6.1) with the faces dissolved, and round 1 of
    * this stack proved that the top of the band turns the frame to soup.
+   *
+   * **This number is a budget for the whole stack, not just for the DOF pass.**
+   * Round 3 measured 17.6 ref-px of 10–90 edge rise on courtside furniture with
+   * the stack on against 0.0 with `?post=off`, which is three to four times what
+   * a 9 px CoC can produce — DOF, camera motion blur and the TAA history
+   * resample were each spending it independently. `motionBlurMax` came down to
+   * fit inside it, the TAA history is now Catmull-Rom rather than bilinear so
+   * accumulation stops costing a pixel a frame, and the DOF cross-fade below
+   * hands back anything under ~2 px untouched.
    */
-  dofFarCoc: 9,
+  dofFarCoc: 8,
   /** §7.4 — near hardwood at the very bottom of the frame, 3–8 px. */
   dofNearCoc: 4,
-  /** §4.5 — a shot ball smears ~0.3 diameters; this caps the camera term. */
-  motionBlurMax: 10,
+  /**
+   * §4.5 — a shot ball smears ~0.3 diameters; this caps the camera term. Four
+   * reference pixels of span is a legible pan and roughly 3 px of 10–90 rise,
+   * which leaves the rest of `dofFarCoc`'s budget for the pass that is supposed
+   * to be spending it. The old 10 was, on its own, more than the configured
+   * far-field CoC could deliver.
+   */
+  motionBlurMax: 4,
   /**
    * §8.6 — radial R/B separation at the corners, 0.8–2.0 px, and the section is
-   * explicit that under-doing it is the right way to be wrong. The value is the
-   * per-channel offset scale; the resulting separation measures out at roughly
-   * 0.7 reference pixels in a corner patch.
+   * explicit that under-doing it is the right way to be wrong.
+   *
+   * The value is the per-channel offset scale, and the separation it produces is
+   * exactly `2 * sqrt(2) * chromatic` reference pixels: the composite offsets by
+   * `ndc * dot(ndc, ndc) * 0.5 * uChromatic * uTexel`, which at the corner
+   * `ndc = (1, 1)` has length `sqrt(2) * 2 * 0.5 * uChromatic` texels, and R and
+   * B move in opposite directions so the separation is twice that. The old 2.4
+   * therefore delivered 6.79 ref-px — three and a half times the cap, and the
+   * comment claiming 0.7 was wrong by an order of magnitude. 0.5 gives 1.41.
    */
-  chromatic: 2.4,
+  chromatic: 0.5,
 } as const;
 
-/** §8.4 — corners 10–22% darker, wide falloff from ~55% of the frame radius. */
-const VIGNETTE = { amount: 0.16, start: 0.55, desaturate: 0.11 } as const;
+/**
+ * §8.4 — corners 10–22% darker, wide falloff from ~55% of the frame radius, and
+ * a *slight* 3–8% desaturation with them.
+ *
+ * The desaturation was 0.11, over §8.4's band at the corner before anything
+ * else touched it. 0.07 puts the corner at 7%, inside the band, and the
+ * composite now applies it downstream of the grade — see the note there, the
+ * upstream version was being crushed by the highlight desaturation and then
+ * overwritten by the highlight balance, so almost none of it was delivered.
+ * Its falloff starts at 0.28 rather than 0.55 so that the analyser's r ≈ 0.71
+ * edge sample sees roughly two thirds of it rather than a third.
+ *
+ * The 0.16 depth is untouched — the flat field measured the corner 14.6%
+ * darker, dead centre of the 10–22 band.
+ */
+const VIGNETTE = { amount: 0.16, start: 0.55, desaturate: 0.070, desaturateStart: 0.28, cool: 0.008 } as const;
+
+/**
+ * §8.1 — bloom must not engage until **1.15–1.5× display white**.
+ *
+ * The threshold is derived from the exposure rather than written down, because
+ * "display white" is `1 / exposure` in the scene-linear buffer the prefilter
+ * reads and nothing else in this file knows that. `LightingSystem` publishes a
+ * suggested `bloomThreshold`, but it is a hand-written constant sitting next to
+ * the exposure rather than derived from it, so it silently leaves the band the
+ * moment the exposure moves; this recomputes it every frame from the exposure
+ * actually being applied in the composite, pulse and all.
+ *
+ * Engagement is at `threshold - knee`, so the threshold has to be lifted by the
+ * knee fraction to put the *start* of the fade-in at the target rather than the
+ * end of it. At exposure 1.3 that is a threshold of 1.13 and a knee of 0.20:
+ * bloom starts at 0.92 scene-linear against display white at 0.77, and the LED
+ * ribbon at 1.7 is still well clear of both.
+ */
+const BLOOM_ENGAGE_WHITE = 1.2;
 /**
  * §8.5 — 1.5–4 sRGB units RMS in the mid-tones. The value is an amplitude on a
  * ±0.5 uniform noise, which measures out at roughly `53 × amplitude` on the
@@ -139,8 +204,30 @@ const GRAIN_AMPLITUDE = 0.044;
  */
 const SHUTTER_SECONDS = 1 / 180;
 
-/** Steady-state TAA history weight. Higher is smoother and ghosts more. */
-const TAA_FEEDBACK = 0.86;
+/**
+ * Steady-state TAA history weight. Higher is smoother and ghosts more.
+ *
+ * 0.86 is an eight-frame effective average, and with a Halton(2,3) sequence
+ * eight positions long that is not quite one full pass over the jitter pattern —
+ * the frames measured 3–5 sRGB units of unresolved high-frequency energy on the
+ * crowd and the net over a 2.57 rms grain floor, i.e. aliasing the accumulation
+ * had not finished eating. 0.92 is a twelve-frame average, comfortably inside
+ * the 900 ms the review harness allows, and it costs nothing under motion
+ * because the per-pixel velocity term below still collapses the weight on
+ * anything moving.
+ */
+const TAA_FEEDBACK = 0.92;
+/**
+ * Variance-clip width, in neighbourhood standard deviations, for a pixel that is
+ * not moving and for one that is. A single 1.1 for both is what stopped the
+ * accumulation converging: on a static, high-frequency region — crowd, net —
+ * the 3×3 neighbourhood's own sigma is large, the history is legitimately
+ * outside it on most frames, and clipping it back every frame throws away the
+ * sub-pixel information the jitter was there to gather. Wide when still, tight
+ * when moving, which is the case ghosting actually comes from.
+ */
+const TAA_CLIP_STILL = 1.6;
+const TAA_CLIP_MOVING = 1.0;
 /** A camera move bigger than this re-starts the accumulation. */
 const TAA_CUT_DISTANCE = 0.5;
 const TAA_CUT_ANGLE = Math.cos((3 * Math.PI) / 180);
@@ -257,6 +344,11 @@ export class PostFXSystem implements System {
     this.compositePass.set('uVignette', VIGNETTE.amount);
     this.compositePass.set('uVignetteStart', VIGNETTE.start);
     this.compositePass.set('uVignetteDesat', VIGNETTE.desaturate);
+    this.compositePass.set('uVignetteDesatStart', VIGNETTE.desaturateStart);
+    this.compositePass.set('uVignetteCool', VIGNETTE.cool);
+
+    this.taaPass?.set('uClipStill', TAA_CLIP_STILL);
+    this.taaPass?.set('uClipMoving', TAA_CLIP_MOVING);
 
     this.presentPass = makePresentPass({ fxaa: !this.useTaa, grain: this.useGrain });
     this.presentPass.set('uGrain', GRAIN_AMPLITUDE);
@@ -458,8 +550,14 @@ export class PostFXSystem implements System {
 
     // ---------------------------------------------------------------- bloom
     const grade = this.lighting?.grade;
+    const exposure = renderer.toneMappingExposure;
     if (this.bloom) {
-      this.bloom.setThreshold(grade?.bloomThreshold ?? 1.1);
+      // Derived, not written down: see BLOOM_ENGAGE_WHITE. `1 / exposure` is
+      // display white in the scene-linear buffer the prefilter reads, and
+      // dividing by (1 - knee fraction) moves the *start* of the knee onto it
+      // instead of the end.
+      const displayWhite = 1 / Math.max(0.05, exposure);
+      this.bloom.setThreshold((BLOOM_ENGAGE_WHITE * displayWhite) / (1 - BLOOM_KNEE_FRACTION));
       this.bloom.render(renderer, this.quad, current, this.pixelScale);
     }
 
@@ -470,7 +568,7 @@ export class PostFXSystem implements System {
     (c.uniforms.uTexel.value as Vector2).set(1 / this.width, 1 / this.height);
     // Exposure is owned by `LightingSystem`, which writes it onto the renderer;
     // three did not apply it because the scene went into a render target.
-    c.set('uExposure', renderer.toneMappingExposure);
+    c.set('uExposure', exposure);
     c.set('uBloomIntensity', grade?.bloomIntensity ?? 0.55);
     c.set('uChromatic', RF.chromatic * this.pixelScale);
     this.quad.draw(renderer, c, this.ldrRT);

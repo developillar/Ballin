@@ -17,6 +17,23 @@
  *  - **Subtle.** "If a reviewer can name the colour of the shadows without
  *    measuring, it is 2–3× too strong."
  *
+ * Both ends therefore have two operators rather than one: a *tint*, which moves
+ * a neutral value onto the right side of the band, and a *ceiling*, which stops
+ * scene content that is already far outside it from dragging the measurement
+ * out the other side. The tint alone was round 2's mistake — it can only add,
+ * and a blue bowl or an amber floor does not need adding to. `softCeil` is
+ * built so a value already inside the band comes back essentially unchanged, so
+ * the two never fight.
+ *
+ * The warm ceiling is deliberately wide through the mid-tones. §8.3's closing
+ * bullet — "the hardwood must still read as maple and the ball must still read
+ * as leather" — is a constraint on this operator, and on a framing where half
+ * the frame is near hardwood the analyser's "top quintile" reaches down to
+ * ~100 sRGB and *is* the mid-tone floor. Tightening the ceiling far enough to
+ * put that frame's R − B under 12 turns maple into grey plywood; the ceiling
+ * stops where the wood stops reading as wood, and the residual is reported
+ * rather than bought.
+ *
  * Plus the two things the tone curve does not do on its own: a gentle S around a
  * mid-tone pivot (which also *helps* §1.1 — it pushes lit hardwood up and the
  * bowl down, widening the bowl-to-court ratio rather than eating it), a toe lift
@@ -57,8 +74,23 @@ export interface GradeSettings {
   shadowSat: number;
   /** Pull toward luminance in the highlights (§8.2 highlight desaturation). */
   highlightDesat: number;
+  /** Luminance at which the highlight desaturation starts, and where it tops out. */
+  highlightOnset: number;
+  highlightFull: number;
+  /** Hard cap on the pull. Must stay below 1 — see the note in `gradeColour`. */
+  highlightDesatMax: number;
   /** Weight on the highlight neutral/cool balance. */
   highlightCool: number;
+  /** §8.3 warm ceiling on R − B, in 0..1 units. Mid-tone value and highlight value. */
+  warmCeilMid: number;
+  warmCeilHigh: number;
+  /** Luminance range over which the warm ceiling tightens from mid to high. */
+  warmOnset: number;
+  warmFull: number;
+  /** §8.3 cool ceiling on B − R in the shadows, and where it stops applying. */
+  coolCeil: number;
+  coolOnset: number;
+  coolFull: number;
   /** Gentle global saturation, applied last. */
   saturation: number;
 }
@@ -69,8 +101,24 @@ export const DEFAULT_GRADE: GradeSettings = {
   toeLift: 0.024,
   shadowCool: 0.32,
   shadowSat: 0.26,
-  highlightDesat: 1.2,
+  // Round 3: the onset was 0.30 and the pull was uncapped at 1.2, which is two
+  // separate faults. The onset meant a frame whose top quintile lives at
+  // 110–160 sRGB (l = 0.43–0.63) got a pull of only 0.09–0.50, so §8.2's
+  // "saturation must fall as values approach white" was not happening where the
+  // measurement looks; and a pull above 1.0 pushes a colour *past* neutral into
+  // its complement, which is a hue inversion, not a desaturation.
+  highlightDesat: 1.30,
+  highlightOnset: 0.18,
+  highlightFull: 0.74,
+  highlightDesatMax: 0.85,
   highlightCool: 1.0,
+  warmCeilMid: 0.21,
+  warmCeilHigh: 0.022,
+  warmOnset: 0.18,
+  warmFull: 0.50,
+  coolCeil: 0.070,
+  coolOnset: 0.34,
+  coolFull: 0.04,
   saturation: 1.05,
 };
 
@@ -95,6 +143,29 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 
 function luma(c: [number, number, number]): number {
   return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+
+/**
+ * Soft ceiling on a single chroma axis: essentially the identity while `v` is
+ * well under `ceiling`, asymptotic to `ceiling` well over it, and smooth in
+ * between. The fourth power is what buys the sharp knee — a value already inside
+ * the band comes out inside the band (0.019 against a 0.022 ceiling is returned
+ * at 0.0186, a fifth of a display unit), so this cannot pull a frame that
+ * already satisfies §8.3 out through the *bottom* of the band.
+ */
+function softCeil(v: number, ceiling: number): number {
+  const c = Math.max(1e-5, ceiling);
+  return v / Math.pow(1 + Math.pow(v / c, 4), 0.25);
+}
+
+/**
+ * Luma-preserving scale of a colour's chroma. Everything below works this way so
+ * an operator that changes a hue relationship cannot also change the exposure —
+ * §1.1's court and bowl bands have to survive the grade untouched.
+ */
+function scaleChroma(c: [number, number, number], f: number): [number, number, number] {
+  const l = luma(c);
+  return [l + (c[0] - l) * f, l + (c[1] - l) * f, l + (c[2] - l) * f];
 }
 
 /** Power-based S around an arbitrary pivot — monotonic, and exact at 0 and 1. */
@@ -149,11 +220,47 @@ export function gradeColour(input: [number, number, number], s: GradeSettings): 
     lSat + (c[2] - lSat) * satGain,
   ];
 
+  // Cool ceiling. The tint above *adds* blue to the shadows, which is right
+  // when the shadow is neutral and wrong when it is already blue — an arena's
+  // bowl is lit by spill and phone screens and arrives cool on its own. §8.3
+  // wants the darkest quartile at B − R of +5 to +14, so the shadow end needs a
+  // limiter as much as it needs a tint, or a frame with a lot of dark blue bowl
+  // in it (the `arena` framing measured +15.4) sails straight through the top.
+  {
+    const lCool = luma(c);
+    const br = c[2] - c[0];
+    if (br > 0) {
+      const w = 1 - smoothstep(s.coolFull, s.coolOnset, lCool);
+      c = scaleChroma(c, 1 - (1 - softCeil(br, s.coolCeil) / br) * w);
+    }
+  }
+
   // Highlight desaturation, then a small neutral balance on top of it.
   const lHi = luma(c);
-  const hiW = smoothstep(0.30, 1.0, lHi);
-  const d = s.highlightDesat * hiW;
+  const hiW = smoothstep(s.highlightOnset, s.highlightFull, lHi);
+  // Capped strictly below 1: at d = 1 the colour is exactly its own luminance,
+  // and above 1 it crosses to the far side of neutral and comes back out in the
+  // complementary hue. The old 1.2 did that to everything over ~0.83 luma.
+  const d = Math.min(s.highlightDesatMax, s.highlightDesat * hiW);
   c = [c[0] + (lHi - c[0]) * d, c[1] + (lHi - c[1]) * d, c[2] + (lHi - c[2]) * d];
+
+  // Warm ceiling. The desaturation above is driven by luminance alone, so it
+  // cannot tell a maple floor at 110 sRGB from a grey wall at 110 sRGB; this
+  // one is driven by the quantity §8.3 actually measures. The ceiling is wide
+  // through the mid-tones — the hardwood must still read as maple and the ball
+  // as leather, which is §8.3's own last bullet — and closes to a few display
+  // units by the top of the range, so the core of a bright source is neutral
+  // and only its skirt keeps the colour.
+  {
+    const lWarm = luma(c);
+    const rb = c[0] - c[2];
+    if (rb > 0) {
+      const t = smoothstep(s.warmOnset, s.warmFull, lWarm);
+      const ceiling = s.warmCeilMid + (s.warmCeilHigh - s.warmCeilMid) * t;
+      c = scaleChroma(c, softCeil(rb, ceiling) / rb);
+    }
+  }
+
   const hw = hiW * s.highlightCool;
   c = [
     c[0] * (1 + HIGHLIGHT_TINT[0] * hw),
@@ -220,6 +327,7 @@ uniform float uChromatic;     // half-separation at the corner, in pixels
 uniform float uVignette;
 uniform float uVignetteStart;
 uniform float uVignetteDesat;
+uniform float uVignetteDesatStart;
 uniform float uVignetteCool;
 uniform float uLutScale;
 uniform float uLutOffset;
@@ -262,11 +370,12 @@ void main() {
   // as a phone filter.
   float r = length(ndc) * 0.70710678;
   float f = smoothstep(uVignetteStart, 1.0, r);
-  float l = postLuma(srgb);
-  srgb = mix(srgb, vec3(l), uVignetteDesat * f);
   srgb *= 1.0 - uVignette * f;
-  // Real vignetting cools as it darkens. Small, and it puts the corner on the
-  // right side of §8.3's shadow split instead of fighting it.
+  // Real vignetting cools as it darkens. Deliberately tiny: the corner still
+  // goes through the highlight desaturation downstream, which multiplies what is
+  // left of its chroma by ~0.15, so anything big enough to *see* here is big
+  // enough to swing the corner's R − B sign — and a sign flip is what the
+  // flat-field capture reads as a 50% edge desaturation (§8.4 wants 3–8%).
   srgb *= vec3(1.0 - 0.8 * uVignetteCool * f, 1.0, 1.0 + uVignetteCool * f);
   srgb = clamp(srgb, 0.0, 1.0);
 
@@ -274,6 +383,23 @@ void main() {
   vec3 graded = texture(tLut, srgb * uLutScale + uLutOffset).rgb;
   srgb = mix(srgb, graded, uLutAmount);
 #endif
+
+  // §8.4's "slight desaturation in the vignette region", and it has to be
+  // applied AFTER the grade, unlike the darkening. The grade's highlight end
+  // multiplies whatever chroma reaches it by ~0.15 and then adds a warm balance
+  // back as a fraction of the *value*, so a desaturation applied upstream is
+  // first crushed and then overwritten by a pedestal that scales with
+  // brightness — which is why the flat field measured the corner as no less
+  // saturated than the centre while the source value said 11%. Downstream it
+  // is delivered as written.
+  //
+  // Its falloff starts earlier than the darkening's on purpose: real optical
+  // desaturation from oblique ray bundles is well under way before the falloff
+  // is measurable, and §8.4's own figure is quoted at the corner while the
+  // analyser samples the edge at r ≈ 0.71.
+  float fd = smoothstep(uVignetteDesatStart, 1.0, r);
+  float lv = postLuma(srgb);
+  srgb = mix(srgb, vec3(lv), uVignetteDesat * fd);
 
   gl_FragColor = vec4(clamp(srgb, 0.0, 1.0), 1.0);
 }
@@ -298,8 +424,9 @@ export function makeCompositePass(opts: CompositeOptions): ScreenPass {
       uChromatic: { value: 1.2 },
       uVignette: { value: 0.16 },
       uVignetteStart: { value: 0.55 },
-      uVignetteDesat: { value: 0.11 },
-      uVignetteCool: { value: 0.018 },
+      uVignetteDesat: { value: 0.070 },
+      uVignetteDesatStart: { value: 0.28 },
+      uVignetteCool: { value: 0.008 },
       uLutScale: { value: (LUT_SIZE - 1) / LUT_SIZE },
       uLutOffset: { value: 0.5 / LUT_SIZE },
       uLutAmount: { value: 1 },

@@ -19,8 +19,11 @@
  *    *form shadows* — they belong in the normal, never painted into albedo,
  *    because painted muscle does not change with light direction and that is
  *    exactly how a reviewer catches it.
- *  - **data**, packed R = sweat proneness, G = roughness, B = 0. Three reads
- *    `.g` for roughness; the skin shader samples `.r` for where sweat beads.
+ *  - **data**, packed R = sweat proneness, G = roughness, B = eye mask. Three
+ *    reads `.g` for roughness; the skin shader samples `.r` for where sweat
+ *    beads and `.b` to swap the material over to sclera / cornea, which is the
+ *    only way a white eye survives a tone-neutral atlas being multiplied by a
+ *    0.27-luminance skin tone.
  *
  * Owned by the players agent.
  */
@@ -101,7 +104,12 @@ export interface SkinTone {
   name: string;
   /** Multiplied over the neutral albedo. */
   color: number;
-  /** Colour of the light that has scattered through and re-emerged. */
+  /**
+   * Tint of the light that has scattered through and re-emerged. It is a *tint*,
+   * not a radiance: the shader scales it by `sqrt(diffuseColor)` so the band's
+   * absolute strength tracks the tone without a dark albedo multiplying it out
+   * of existence. Keep it bright and saturated; luminance comes from the albedo.
+   */
   subsurface: number;
   /** How far light wraps past the terminator. Darker skin scatters less. */
   wrap: number;
@@ -114,55 +122,83 @@ export interface SkinTone {
 }
 
 /**
- * A plausible NBA range. The subsurface colour and wrap distance shift with the
- * tone rather than staying a fixed red — melanin absorbs the long free paths, so
- * deeper tones show a shorter, less saturated terminator and a harder specular.
+ * A plausible NBA range — stated as **diffuse albedo**, not as the display value
+ * we want out the other end.
+ *
+ * That distinction is what round 0 got wrong. The old table ran 0x6b452b for the
+ * deepest tone: a linear luminance of 0.076, against 0.60 for the home white in
+ * the same frame. Under a rig whose banks sit at 62–68° elevation, a vertical
+ * torso already takes only ~0.35 of the floor's irradiance, so 0.076 albedo put
+ * every skin surface in the frame inside a 15-unit window at the bottom of the
+ * tone curve — measured p50 L = 23.6 on the shoulder against L = 144 for the kit
+ * 60 px away. Nothing painted into the normal map can be seen at L 24, and no
+ * amount of mesh resolution helps.
+ *
+ * Real skin diffuse albedo, once the specular lobe is separated out, runs from
+ * about 0.62 luminance (type I) to about 0.30 (type VI) — a ~2× span, not the
+ * 6.8× the old table used, and not a range that reaches anywhere near 0.08.
+ * These are measured to 0.61 → 0.36, checked with
+ * `((c/255 + 0.055) / 1.055) ^ 2.4` per channel and the Rec.709 weights, and
+ * the span is deliberately kept: §3.3 wants a squad to read as a squad.
+ *
+ * The absolute level is set by a measurement, not by taste. An up-facing
+ * shoulder on the mid tone measured L 112 in `players-r1` and L 110 in
+ * `players-r2` against §8.2's 120–190, so the table was walked up until it
+ * cleared. It is now at the top of the plausible range and should come *down*
+ * if the rig ever puts more than ~0.5 of the floor's irradiance on a shoulder
+ * cap — the shoulder there measures 0.73× the adjacent hardwood while the two
+ * albedos are within 5% of each other, which is a lighting figure, not a
+ * material one.
+ *
+ * The subsurface colour and wrap distance still shift with the tone — melanin
+ * absorbs the long free paths, so deeper tones show a shorter, less saturated
+ * terminator and a harder specular.
  */
 export const SKIN_TONES: readonly SkinTone[] = [
   {
     name: 'fair',
-    color: 0xdcb69e,
-    subsurface: 0xd8402a,
+    color: 0xe7c9b1, // linear Y 0.619
+    subsurface: 0xff6a44,
     wrap: 0.42,
-    sss: 0.34,
+    sss: 0.62,
     oilRoughness: 0.55,
-    specular: 0.78,
+    specular: 0.72,
   },
   {
     name: 'olive',
-    color: 0xc79b7c,
-    subsurface: 0xc73a24,
+    color: 0xe2c1a4, // linear Y 0.570
+    subsurface: 0xf85c34,
     wrap: 0.36,
-    sss: 0.3,
+    sss: 0.56,
     oilRoughness: 0.53,
-    specular: 0.85,
+    specular: 0.78,
   },
   {
     name: 'tan',
-    color: 0xa87d5c,
-    subsurface: 0xb03118,
+    color: 0xdcb99b, // linear Y 0.523
+    subsurface: 0xef4f28,
     wrap: 0.3,
-    sss: 0.26,
+    sss: 0.5,
     oilRoughness: 0.5,
-    specular: 0.95,
+    specular: 0.86,
   },
   {
     name: 'brown',
-    color: 0x8e6140,
-    subsurface: 0x92240f,
-    wrap: 0.24,
-    sss: 0.21,
+    color: 0xd6b092, // linear Y 0.474
+    subsurface: 0xe0431e,
+    wrap: 0.25,
+    sss: 0.44,
     oilRoughness: 0.47,
-    specular: 1.05,
+    specular: 0.93,
   },
   {
     name: 'deep',
-    color: 0x6b452b,
-    subsurface: 0x6d1708,
-    wrap: 0.19,
-    sss: 0.17,
+    color: 0xcda380, // linear Y 0.412
+    subsurface: 0xcc3a17,
+    wrap: 0.2,
+    sss: 0.38,
     oilRoughness: 0.44,
-    specular: 1.18,
+    specular: 1.0,
   },
 ];
 
@@ -218,6 +254,15 @@ interface Sample {
   rough: number;
   /** How readily this patch beads sweat, 0..1. */
   sweat: number;
+  /**
+   * Eye mask, packed into the data map's blue channel: 0 skin, ~0.55 iris,
+   * ~1.0 sclera. The shader replaces `diffuseColor` there rather than tinting
+   * it, because the sclera is the one part of a face that is *not* skin — a
+   * white painted into a tone-neutral atlas and then multiplied by a 0.27-albedo
+   * tone lands at L 30, which is how round 0 ended up with 87% of the eye band
+   * inside ±5 units of its own median.
+   */
+  eye: number;
 }
 
 /**
@@ -233,6 +278,7 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
   s.b = 1;
   s.rough = 0.47;
   s.sweat = 0.35;
+  s.eye = 0;
 
   // Continuous across the u wrap: feed the noise a cylinder, not a plane.
   const cx = Math.cos(u * TAU) * 0.5 + 0.5;
@@ -345,27 +391,36 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
       s.g = lerp(s.g, 0.24, browK * 0.85);
       s.b = lerp(s.b, 0.21, browK * 0.85);
       s.rough += browK * 0.2;
-      // Lash line and the sclera/iris, kept tiny — at FLOOR framing a head is
-      // 25 px and resolvable eyes there are uncanny.
+      // Lash line, then the eye proper. An eye is ~30 mm across on a ~570 mm
+      // head circumference (u) and ~10 mm of opening on a ~230 mm chin-to-crown
+      // span (v), so the aperture is 0.026 in u by 0.019 in v — round 0 had the
+      // v radius at 0.011, less than half the real opening, which is part of
+      // why nothing survived. The mask lands in `eye` and the shader overrides
+      // the material there; the albedo lift below only keeps the atlas sane if
+      // it is ever previewed on its own.
       const lash =
-        blob(u, v, 0.5 - 0.043, 0.472, 0.033, 0.008) + blob(u, v, 0.5 + 0.043, 0.472, 0.033, 0.008);
+        blob(u, v, 0.5 - 0.043, 0.478, 0.034, 0.009) + blob(u, v, 0.5 + 0.043, 0.478, 0.034, 0.009);
       const lashK = clamp01(lash * 1.6);
       s.r = lerp(s.r, 0.18, lashK);
       s.g = lerp(s.g, 0.15, lashK);
       s.b = lerp(s.b, 0.14, lashK);
       const sclera =
-        blob(u, v, 0.5 - 0.043, 0.454, 0.026, 0.011) + blob(u, v, 0.5 + 0.043, 0.454, 0.026, 0.011);
-      const scleraK = clamp01(sclera * 2.2);
+        blob(u, v, 0.5 - 0.043, 0.4555, 0.028, 0.019) + blob(u, v, 0.5 + 0.043, 0.4555, 0.028, 0.019);
+      const scleraK = clamp01(sclera * 2.6);
       s.r = lerp(s.r, 1.55, scleraK * 0.8);
       s.g = lerp(s.g, 1.5, scleraK * 0.8);
       s.b = lerp(s.b, 1.42, scleraK * 0.8);
       const iris =
-        blob(u, v, 0.5 - 0.043, 0.454, 0.011, 0.008) + blob(u, v, 0.5 + 0.043, 0.454, 0.011, 0.008);
-      const irisK = clamp01(iris * 2.4);
+        blob(u, v, 0.5 - 0.043, 0.4535, 0.0115, 0.0165) +
+        blob(u, v, 0.5 + 0.043, 0.4535, 0.0115, 0.0165);
+      const irisK = clamp01(iris * 2.6);
       s.r = lerp(s.r, 0.24, irisK);
       s.g = lerp(s.g, 0.2, irisK);
       s.b = lerp(s.b, 0.17, irisK);
       s.rough -= irisK * 0.32;
+      // 1.0 sclera, 0.55 iris, and the lash line pushes it back to skin so the
+      // lid edge stays a hard dark boundary instead of a bright halo.
+      s.eye = clamp01(lerp(scleraK, 0.55, irisK) * (1 - lashK * 0.9));
       // Lips: redder, smoother, with a defined vermilion border.
       const lip = clamp01((blob(u, v, 0.5, 0.185, 0.05, 0.02) + blob(u, v, 0.5, 0.155, 0.055, 0.02)) * 1.2);
       s.r *= 1 + lip * 0.3;
@@ -570,6 +625,7 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
 
   s.rough = clamp01(s.rough);
   s.sweat = clamp01(s.sweat);
+  s.eye = clamp01(s.eye);
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +635,7 @@ function sample(part: SkinPart, u: number, v: number, s: Sample, seed: number): 
 export interface SkinMaps {
   albedo: CanvasTexture;
   normal: CanvasTexture;
-  /** R = sweat proneness, G = roughness. */
+  /** R = sweat proneness, G = roughness, B = eye mask (0.55 iris, 1 sclera). */
   data: CanvasTexture;
   dispose(): void;
 }
@@ -608,7 +664,7 @@ export function bakeSkinAtlas(size: number, anisotropy: number, seed = 90210): S
   const dat = new Uint8ClampedArray(W * H * 4);
   const partOf = new Int8Array(W * H).fill(-1);
 
-  const s: Sample = { h: 0, r: 1, g: 1, b: 1, rough: 0.47, sweat: 0.35 };
+  const s: Sample = { h: 0, r: 1, g: 1, b: 1, rough: 0.47, sweat: 0.35, eye: 0 };
 
   for (let p = 0; p < PART_ORDER.length; p++) {
     const part = PART_ORDER[p];
@@ -639,7 +695,7 @@ export function bakeSkinAtlas(size: number, anisotropy: number, seed = 90210): S
         alb[o + 3] = 255;
         dat[o] = s.sweat * 255;
         dat[o + 1] = s.rough * 255;
-        dat[o + 2] = 0;
+        dat[o + 2] = s.eye * 255;
         dat[o + 3] = 255;
       }
     }
@@ -762,10 +818,18 @@ export function bakeHairMask(size = 256, seed = 771): HairMaps {
       // Strands run along v; the noise is stretched hard in that direction.
       const strand = valueNoise2(u * size * 0.5, v * 34, seed);
       const clump = fbm2(u * 22, v * 60, 3, 2, 0.5, seed + 5);
+      // A second, much coarser clump. Without it the outer shells fray at texel
+      // scale, which filters back into a smooth edge — a helmet with soft
+      // borders. §3.7 wants the break-up at a 2–8 px scale, i.e. in *tufts*,
+      // so the coarse term is what actually decides where the outline bites.
+      const tuft = fbm2(u * 7, v * 9, 2, 2, 0.5, seed + 17);
       const j = jitter[(x + Math.floor(v * 41)) % size];
-      const cover = strand * 0.55 + clump * 0.33 + j * 0.12;
-      const a = v > 0.96 ? 1 : clamp01((cover * density - 0.3) * 3.6);
-      const shade = 0.42 + 0.58 * strand;
+      const cover = strand * 0.4 + clump * 0.24 + tuft * 0.26 + j * 0.1;
+      const a = v > 0.96 ? 1 : clamp01((cover * density - 0.3) * 4.6);
+      // Banded, not smooth: the strand noise drives a narrow bright band so the
+      // anisotropic lobe in the hair shader has something to sit on.
+      const band = Math.pow(clamp01(strand), 2.2);
+      const shade = 0.34 + 0.46 * strand + 0.34 * band;
       const o = (y * size + x) * 4;
       sd[o] = shade * 255;
       sd[o + 1] = shade * 255;

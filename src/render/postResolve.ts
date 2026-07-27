@@ -83,7 +83,11 @@ void main() {
     float len = length(velPx);
     if (len > uMaxBlurPx) velocity *= uMaxBlurPx / len;
 
-    if (len > 0.6) {
+    // Under a pixel and a half of span there is nothing to smear and the tap
+    // loop is a plain box blur applied for no reason — which on a camera that
+    // carries §7.3's micro-handheld noise is *every* frame, including a still
+    // capture the operator meant to be sharp.
+    if (len > 1.5) {
       float jitter = postIGN(gl_FragCoord.xy) - 0.5;
       vec3 acc = vec3(0.0);
       for (int i = 0; i < MOTION_TAPS; i++) {

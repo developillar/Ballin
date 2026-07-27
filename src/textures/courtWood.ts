@@ -206,8 +206,15 @@ export function bakeMapleDetail(W: number, H: number, seed = 20260726): MapleDet
       const ray = valueNoise2(x * rayFx, z * 150, spec.seed + 61);
       const rayK = Math.pow(clamp01((ray - 0.76) / 0.24), 2) * 0.34;
 
+      // Tone amplitude up from 0.18. The near floor measured 1.80 sRGB of
+      // hp(7 px) RMS and the closeup 2.79 against a film-grain floor of
+      // 3.65–4.52 (§8.5), i.e. the maple's own figure was sitting *under* the
+      // post chain's noise. The height field is left where it was: the relief
+      // is already at the depth a sanded board has, and deepening it makes the
+      // milled lip outrun the tonal seam, which inverts the joint into a bright
+      // line.
       let h = -dark * 0.00012 + rayK * 0.00002;
-      let ton = 0.5 - dark * 0.18 + rayK * 0.03;
+      let ton = 0.5 - dark * 0.22 + rayK * 0.045;
 
       // --- knots ------------------------------------------------------------
       for (const k of knots) {

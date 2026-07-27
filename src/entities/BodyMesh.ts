@@ -1116,6 +1116,13 @@ interface LoftVertex {
   nz: number;
   u: number;
   v: number;
+  /**
+   * How free this vertex is to lag behind the body, 0..1. 0 at a shoulder yoke
+   * or a waistband, 1 at a hem. Only meaningful on the kit; see `KitMaterial`.
+   */
+  cloth?: number;
+  /** Sky occlusion, folded into the vertex colour. 1 = open. */
+  ao?: number;
 }
 
 class MeshBuilder {
@@ -1125,8 +1132,12 @@ class MeshBuilder {
   si: number[] = [];
   sw: number[] = [];
   idx: number[] = [];
+  cl: number[] = [];
+  col: number[] = [];
   /** Bones the vertices pushed from here on are allowed to ride. */
   mask: Uint8Array | null = null;
+  /** Emit the `aCloth` and `color` attributes. Kit only; the rest do not pay. */
+  garment = false;
   private readonly bi: number[] = [0, 0, 0, 0];
   private readonly bw: number[] = [0, 0, 0, 0];
 
@@ -1141,6 +1152,13 @@ class MeshBuilder {
     skinWeights(this.segs, v.x, v.y, v.z, this.bi, this.bw, this.mask);
     this.si.push(this.bi[0], this.bi[1], this.bi[2], this.bi[3]);
     this.sw.push(this.bw[0], this.bw[1], this.bw[2], this.bw[3]);
+    if (this.garment) {
+      this.cl.push(v.cloth ?? 0, 0);
+      const a = v.ao ?? 1;
+      // Slightly cooler in occlusion: the light a hem does still see is bounce
+      // off the floor plus the bowl, not the banks.
+      this.col.push(a, a * (1 + (1 - a) * 0.02), a * (1 + (1 - a) * 0.06));
+    }
     return id;
   }
 
@@ -1155,6 +1173,10 @@ class MeshBuilder {
     g.setAttribute('uv', new Float32BufferAttribute(this.uv, 2));
     g.setAttribute('skinIndex', new Uint16BufferAttribute(this.si, 4));
     g.setAttribute('skinWeight', new Float32BufferAttribute(this.sw, 4));
+    if (this.garment) {
+      g.setAttribute('aCloth', new Float32BufferAttribute(this.cl, 2));
+      g.setAttribute('color', new Float32BufferAttribute(this.col, 3));
+    }
     g.setIndex(this.idx);
     g.boundingSphere = new Sphere(new Vector3(0, height * 0.5, 0), height * 1.5);
     return g;
@@ -1221,9 +1243,9 @@ export function buildBody(opts: BodyOptions): BodyBuild {
   // The garment shells trace the torso and the legs only — a jersey must not
   // find the arm and grow a sleeve, and the shorts must not find the calf.
   const dressForm = prims.filter((p) => p.group === 'torso');
-  const legForm = prims.filter((p) => p.group === 'torso' || p.group === 'leg');
 
   const body = finishBody(raw, field, segs, sk, seed);
+  const legForm = prims.filter((p) => p.group === 'torso' || p.group === 'leg');
   const kit = buildKit(dressForm, legForm, segs, sk, shape, detail, seed);
   const shoes = buildShoes(segs, sk, shape, detail);
   const hair = opts.hair === 'bald' ? null : buildHair(segs, sk, opts.hair, detail, seed);
@@ -1303,19 +1325,35 @@ function finishBody(
       occ += (w * Math.max(0, d - s)) / d;
       w *= 0.62;
     }
-    const ao = clamp01(1 - occ * 0.34);
+    // Raised to the power so the term is near 1 on open surfaces and only bites
+    // where the field is genuinely closed. A linear ramp put ~11% of shade on
+    // every trapezius and deltoid cap in the frame, which is a fifth of a stop
+    // taken off exactly the patches §8.2 measures.
+    const ao = clamp01(1 - Math.pow(occ, 1.5) * 0.58);
 
     const mottle = fbm2(x * 6 + freckle, y * 6, 3, 2.1, 0.5, seed) - 0.5;
     const warm = part === 'hand' ? 0.7 : part === 'foreArm' ? 0.28 : part === 'head' ? 0.3 : 0;
-    const shade = 0.8 + 0.2 * ao;
+    // §3.2 puts the anatomical creases at 0.55–0.80 and says never below ~0.4,
+    // which reads as dirt. Round 0's `0.8 + 0.2 * ao` could not reach 0.8 even
+    // in a fully closed armpit — the range was doing nothing but flattening the
+    // open surfaces by up to a fifth.
+    const shade = 0.44 + 0.56 * ao;
     col[i * 3] = shade * (1 + mottle * 0.06 + warm * 0.05);
     col[i * 3 + 1] = shade * (1 + mottle * 0.04 - warm * 0.015);
     col[i * 3 + 2] = shade * (1 + mottle * 0.03 - warm * 0.032);
 
     // Flesh data: how readily this patch sweats, and how thin it is — thin
     // parts (ears, fingers, nose) have to glow when backlit.
-    const local = segDistance(segs[dom], x, y, z);
-    const thin = clamp01(1 - local / (0.05 * sk.height));
+    //
+    // Thickness is *measured*, by probing the field along −normal: a torso is
+    // still solid 12 mm in, an ear or a nostril wing is already back outside.
+    // Round 0 used distance-from-the-bone-axis instead, which reports an ear as
+    // the thickest thing on the head because an ear is as far off the skull
+    // axis as it is possible to get — so the one term §3.3 asks for on ears and
+    // nostril wings was being switched off exactly where it was needed.
+    const probe = 0.012 * (sk.height / 1.98);
+    const inner = field.sampleGrid(x - nxv * probe, y - nyv * probe, z - nzv * probe);
+    const thin = clamp01(1 + inner / probe);
     flesh[i * 2] =
       part === 'head' ? 0.95 : part === 'torso' ? 0.85 : part === 'upperArm' ? 0.8 : 0.55;
     flesh[i * 2 + 1] = thin;
@@ -1411,10 +1449,16 @@ function buildKit(
   const H = sk.height;
   const S = H / 1.98;
   const mb = new MeshBuilder(segs);
+  mb.garment = true;
   mb.mask = MASK_JERSEY;
-  const around = [24, 34, 44][detail];
+  const around = [28, 40, 60][detail];
   const downJ = [10, 13, 16][detail];
-  const hemY = 0.474 * H;
+  // Low enough that a forward-bent torso cannot swing the hem clear of the
+  // shorts waistband: the two overlap by 0.093 H in rest and the jersey is
+  // skinned to `spine`/`chest`, so the ring lifts several centimetres in a
+  // defensive stance. `players-r2` showed daylight between them on #24.
+  const hemY = 0.462 * H;
+  const rng = makeRng(seed + 617);
 
   // Top edge of the jersey, by angle from the chest. The dips at 1.13 and 2.02
   // rad are the front and back of each armhole; between them the cloth rides
@@ -1468,8 +1512,7 @@ function buildKit(
       const y = lerp(topAt(Math.abs(theta)), hemY, v);
       const rBody = surfaceRadius(dressForm, y, 0, 0, dirX, dirZ, 0.02 * S, 0.34 * S);
       const gap = lerp(0.011, 0.034, Math.pow(v, 0.75)) * S;
-      const fold = (fbm2(u * 7.5, v * 3.4, 3, 2.2, 0.55, seed) - 0.5) * lerp(0.004, 0.016, v) * S;
-      rr.push(rBody + gap + fold);
+      rr.push(rBody + gap);
       yy.push(y);
     }
     rad.push(rr);
@@ -1489,16 +1532,52 @@ function buildKit(
     }
   }
 
+  // Drape. Folds go on *after* the relaxation, because the relaxation exists to
+  // kill the 70 mm step between the ring that finds the deltoid and the one
+  // below it, and it kills a fold just as effectively — round 0 ran the fold
+  // noise through it and measured zero shading minima with prominence ≥ 6 sRGB
+  // across the whole torso.
+  //
+  // A fold is a crease with two raised shoulders, not a sine wave: the cloth
+  // buckles inward on a line and stands proud either side of it. Each one drifts
+  // in u as it descends, which is both what real drape does and what
+  // distinguishes a fold from printed side piping under measurement — the
+  // piping's minimum sits at the same x on every row.
+  // Two numbers here were both set by measurement.
+  //
+  // *Width*: a crease narrower than the loft's own vertex spacing is not a
+  // fold, it is aliasing. Round 1 ran 28–46 mm creases against a 44-segment
+  // ring — 25 mm per vertex — so every fold landed between two vertices and the
+  // torso measured zero minima with prominence ≥ 6. At `around = 60` a 40–70 mm
+  // crease is 2.5–4 vertices, which survives.
+  //
+  // *Count*: §3.4 asks for 3–7 folds "across a torso", meaning the torso a
+  // viewer can see. A closeup shows roughly a third of the circumference, so
+  // seven folds spread all the way round put two and a half in frame — which is
+  // what `players-r5` measured. Ten does it.
+  const jerseyFolds = makeFolds([6, 8, 10][detail], rng, 0.34, 1.0, 0.045);
+  const jerseyFoldDepth = 0.016 * S;
+
   const ring: number[][] = [];
   for (let vi = 0; vi <= downJ; vi++) {
     const v = vi / downJ;
     const row: number[] = [];
     for (let ui = 0; ui < around; ui++) {
       const [dirX, dirZ] = dirs[ui];
-      const r = rad[vi][ui];
+      const u = ui / around;
+      // Deepest where the jersey hangs free off the shoulders, i.e. the waist,
+      // and around the armhole; nearly flat across the yoke where it is
+      // supported.
+      const foldV = foldAt(jerseyFolds, u, v);
+      const r = rad[vi][ui] + foldV * jerseyFoldDepth;
       const x = dirX * r;
       const y = ys[vi][ui];
       const z = dirZ * r;
+      // Tangential tilt from the crease: (∂r/∂θ) / r.
+      const theta = (u - 0.5) * Math.PI * 2;
+      const tilt = (foldSlope(jerseyFolds, u, v) * jerseyFoldDepth) / (Math.PI * 2 * r);
+      const tanX = Math.cos(theta);
+      const tanZ = -Math.sin(theta);
       // The armhole is *not* cut out of this surface. It was, and the result
       // was worse: a hole carved against the rest pose is in the wrong place
       // the moment the arm moves, so it opens as a ragged notch across the
@@ -1506,7 +1585,18 @@ function buildKit(
       // the intersection curve is exactly the silhouette an armhole should
       // have — with the arm filling it in every pose rather than one.
       row.push(
-        mb.push({ x, y, z, nx: dirX, ny: 0.05, nz: dirZ, u: ui / around, v: KIT_UV.jersey(v) }),
+        mb.push({
+          x,
+          y,
+          z,
+          nx: dirX - tanX * tilt,
+          ny: 0.05,
+          nz: dirZ - tanZ * tilt,
+          u,
+          v: KIT_UV.jersey(v),
+          cloth: Math.pow(v, 1.6) * 0.85,
+          ao: skyAo(v, 0.28) * foldShade(foldV, 0.34),
+        }),
       );
     }
     ring.push(row);
@@ -1517,43 +1607,120 @@ function buildKit(
       mb.quad(ring[vi][ui], ring[vi + 1][ui], ring[vi + 1][u2], ring[vi][u2]);
     }
   }
-  rimRow(mb, ring[0], around, 0.006 * S, -0.009 * S, KIT_UV.jersey(0.01));
-  rimRow(mb, ring[downJ], around, 0.006 * S, -0.011 * S, KIT_UV.jersey(0.985));
+  rimRow(mb, ring[0], around, 0.006 * S, -0.009 * S, KIT_UV.jersey(0.01), 0, skyAo(0, 0.28));
+  rimRow(
+    mb,
+    ring[downJ],
+    around,
+    0.006 * S,
+    -0.011 * S,
+    KIT_UV.jersey(0.985),
+    0.85,
+    skyAo(1, 0.28) * 0.92,
+  );
 
   // --- Shorts -----------------------------------------------------------
   mb.mask = MASK_SHORTS;
   const I = BONE_INDEX;
-  const waistY = 0.545 * H;
+  const waistY = 0.555 * H;
   const crotchY = 0.468 * H;
-  const hipRings = 4;
+  const hipRings = 6;
   const hipRow: number[][] = [];
+
+  /**
+   * The thigh's real half-widths at a given height, measured off the body
+   * field rather than guessed at.
+   *
+   * Round 0 hard-coded `lerp(0.09, 0.073)` and got away with it because the
+   * hip shell's skirt wings covered whatever the tube missed. With the wings
+   * gone the tube is the silhouette, and on the heavier archetypes the thigh
+   * pushed straight through it — `players-r4` shows bare skin inside the
+   * shorts on #3 in the gameplay framing.
+   *
+   * The marches run *outward* and *forward* from the thigh's own axis, never
+   * toward the midline, which is the direction that runs through the crotch
+   * into the other leg and balloons the tube — the failure the original
+   * comment warned about. Fifteen bisection steps each, at most 18 per leg per
+   * build, and the results are cached per ring height.
+   */
+  const thighAt = (thigh: Segment, y: number): [number, number, number, number] => {
+    const t = clamp01((thigh.a.y - y) / Math.max(1e-4, thigh.a.y - thigh.b.y));
+    const cx = lerp(thigh.a.x, thigh.b.x, t);
+    const cz = lerp(thigh.a.z, thigh.b.z, t);
+    const outX = cx >= 0 ? 1 : -1;
+    const rs = surfaceRadius(legForm, y, cx, cz, outX, 0, 0.02 * S, 0.2 * S);
+    const rf = surfaceRadius(legForm, y, cx, cz, 0, 1, 0.02 * S, 0.2 * S);
+    return [cx, cz, rs, rf];
+  };
+
+  /**
+   * Radius of a shorts shell ring, solved against the pelvis *and* the two
+   * thighs.
+   *
+   * Round 0 marched `legForm` — torso plus legs — from the body's centre line,
+   * which at crotch height finds the *outer* face of the far thigh and returns
+   * a radius wider than the hips. Combined with a fixed `lerp(1, 0.7, v²)`
+   * taper that produced the pair of skirt wings the file's own comment named,
+   * and, in silhouette, an 80-row dead-vertical outline no cloth makes.
+   *
+   * The fix is to solve the two contributions separately and take the union:
+   * the pelvis surface from the torso field, and the exact ray/cylinder
+   * intersection with each thigh. Between the legs neither contributes, so the
+   * shell narrows there, which is what shorts actually do.
+   */
+  const shortsRadius = (
+    y: number,
+    dirX: number,
+    dirZ: number,
+    legs: ReadonlyArray<readonly [number, number, number, number]>,
+  ): number => {
+    let r = surfaceRadius(dressForm, y, 0, 0, dirX, dirZ, 0.02 * S, 0.34 * S);
+    for (const [cx, cz, rs, rf] of legs) {
+      const proj = cx * dirX + cz * dirZ;
+      if (proj <= 0) continue;
+      const perp2 = Math.max(0, cx * cx + cz * cz - proj * proj);
+      // Elliptical cross-section: side radius across X, front radius across Z.
+      const rt = Math.hypot(rs * dirX, rf * dirZ);
+      if (perp2 >= rt * rt) continue;
+      r = Math.max(r, proj + Math.sqrt(rt * rt - perp2));
+    }
+    return r;
+  };
+
+  const hipFolds = makeFolds(6, rng, 0.2, 1.0, 0.075);
   for (let vi = 0; vi <= hipRings; vi++) {
     const v = vi / hipRings;
     const y = lerp(waistY, crotchY, v);
+    // The lower rings pull inside the leg tubes that overlap them. Without it
+    // the yoke and the tubes both reach the silhouette and the overlap draws as
+    // a pair of flat panels standing off the hip.
+    const tuck = lerp(1, 0.86, v * v);
+    const legs = [thighAt(segs[I.thighL], y), thighAt(segs[I.thighR], y)] as const;
     const row: number[] = [];
     for (let ui = 0; ui < around; ui++) {
       const u = ui / around;
       const theta = (u - 0.5) * Math.PI * 2;
       const dirX = Math.sin(theta);
       const dirZ = Math.cos(theta);
-      // Tapered toward the crotch so the shell tucks inside the leg tubes;
-      // left at the pelvis radius it flares out as a pair of skirt wings.
-      const rBody = surfaceRadius(legForm, y, 0, 0, dirX, dirZ, 0.02 * S, 0.34 * S) *
-        lerp(1, 0.7, v * v);
-      const gap = lerp(0.009, 0.02, v) * S;
-      const fold =
-        (fbm2(u * 4.5, v * 2.2 + 11, 2, 2.2, 0.55, seed + 5) - 0.5) * lerp(0.002, 0.012, v) * S;
-      const r = rBody + gap + fold;
+      const gap = lerp(0.011, 0.026, v) * S;
+      const hipFoldV = foldAt(hipFolds, u, v);
+      const r = (shortsRadius(y, dirX, dirZ, legs) + gap) * tuck + hipFoldV * 0.011 * S;
+      const tilt = (foldSlope(hipFolds, u, v) * 0.011 * S) / (Math.PI * 2 * r);
+      const tanX = Math.cos(theta);
+      const tanZ = -Math.sin(theta);
       row.push(
         mb.push({
           x: dirX * r,
           y,
           z: dirZ * r,
-          nx: dirX,
+          nx: dirX - tanX * tilt,
           ny: 0.1,
-          nz: dirZ,
+          nz: dirZ - tanZ * tilt,
           u,
           v: KIT_UV.shorts(v * 0.28),
+          // The waistband is elastic and grips: it does not lag at all.
+          cloth: v * 0.12,
+          ao: (0.86 - v * 0.04) * foldShade(hipFoldV, 0.26),
         }),
       );
     }
@@ -1565,52 +1732,79 @@ function buildKit(
       mb.quad(hipRow[vi][ui], hipRow[vi + 1][ui], hipRow[vi + 1][u2], hipRow[vi][u2]);
     }
   }
-  rimRow(mb, hipRow[0], around, 0.008 * S, 0.013 * S, KIT_UV.shorts(0.02));
-  rimRow(mb, hipRow[hipRings], around, 0.05 * S, -0.02 * S, KIT_UV.shorts(0.34));
+  rimRow(mb, hipRow[0], around, 0.008 * S, 0.013 * S, KIT_UV.shorts(0.02), 0, 0.86);
+  // No rim row on the yoke's lower edge. It is an *internal* boundary — the leg
+  // tubes cover it — and extruding it 50 mm inward against a cross-section that
+  // is now peanut-shaped rather than round produced a self-intersecting annulus
+  // that read, correctly, as a flat panel hanging off the hip.
 
   // Leg tubes overlap the hip shell inside the body — invisible, and far
   // better behaved than splitting one tube at the crotch.
-  const legRings = [4, 5, 7][detail];
+  const legRings = [5, 6, 8][detail];
   const hemLegY = 0.336 * H;
-  const around2 = Math.max(10, Math.round(around * 0.6));
+  const around2 = Math.max(12, Math.round(around * 0.62));
   for (const sgn of [1, -1]) {
     const thigh = segs[sgn > 0 ? I.thighL : I.thighR];
+    // Heavier cloth than the jersey: §3.5 asks for fewer, larger folds, so
+    // three per leg at roughly double the jersey's depth, plus a side-seam
+    // crease locked to the outer azimuth.
+    const legFolds = makeFolds(4, rng, 0.3, 1.0, 0.095);
+    const outerU = sgn > 0 ? 0.25 : 0.75;
     const rows: number[][] = [];
     for (let vi = 0; vi <= legRings; vi++) {
       const v = vi / legRings;
-      const y = lerp(crotchY + 0.044 * H, hemLegY, v);
-      const tAlong = clamp01((thigh.a.y - y) / Math.max(1e-4, thigh.a.y - thigh.b.y));
-      const cx = lerp(thigh.a.x, thigh.b.x, tAlong);
-      const cz = lerp(thigh.a.z, thigh.b.z, tAlong);
       const row: number[] = [];
       for (let ui = 0; ui < around2; ui++) {
         const u = ui / around2;
         const theta = (u - 0.5) * Math.PI * 2;
         const dirX = Math.sin(theta);
         const dirZ = Math.cos(theta);
-        // The thigh radius is taken analytically from the same profile the
-        // field was built from rather than by ray-marching the body: a march
-        // from the thigh axis toward the midline runs straight through the
-        // crotch into the other leg and balloons the tube into a hanging slab.
-        const rs = lerp(0.09, 0.073, v) * S * shape.build;
-        const rf = lerp(0.098, 0.08, v) * S * shape.build;
+        // A hem is never level. Real cloth hangs longer where a fold carries it
+        // down, so the hem row's height varies with the fold field — which is
+        // also what stops the shorts reading as a slab with a ruled bottom edge
+        // at FLOOR framing.
+        const hemWave =
+          (Math.sin(u * Math.PI * 2 * 2 + sgn * 1.7) * 0.6 +
+            Math.sin(u * Math.PI * 2 * 3 - sgn * 0.9) * 0.4) *
+          0.011 *
+          S;
+        const y = lerp(crotchY + 0.062 * H, hemLegY, v) + hemWave * Math.pow(v, 2.2);
+        const [cx, cz, rs, rf] = thighAt(thigh, y);
         const sn = Math.sin(theta) / rs;
         const cs = Math.cos(theta) / rf;
         const rBody = 1 / Math.sqrt(sn * sn + cs * cs);
-        // Heavier cloth than the jersey: fewer, larger folds, a modest flare.
-        const gap = lerp(0.016, 0.032, Math.pow(v, 0.8)) * S * shape.build;
-        const fold = Math.sin(u * Math.PI * 2 * 3 + v * 2.1 + sgn) * lerp(0.002, 0.009, v) * S;
-        const r = rBody + gap + fold;
+        const gap = lerp(0.016, 0.038, Math.pow(v, 0.8)) * S * shape.build;
+        const legFoldV = foldAt(legFolds, u, v);
+        const fold = legFoldV * 0.021 * S;
+        // Side seam: a hard crease down the outer edge, per §3.5.
+        const seamD = wrapDelta(u, outerU) / 0.02;
+        const seamAmp = 0.006 * S * (0.4 + 0.6 * v);
+        const seam = -Math.exp(-seamD * seamD) * seamAmp;
+        const r = rBody + gap + fold + seam;
+        // Crease slope plus the seam's own, both as a tangential normal tilt.
+        const dSeam = (2 * seamD * Math.exp(-seamD * seamD) * seamAmp) / 0.02;
+        const tilt =
+          (foldSlope(legFolds, u, v) * 0.021 * S + dSeam) / (Math.PI * 2 * r);
+        const tanX = Math.cos(theta);
+        const tanZ = -Math.sin(theta);
         row.push(
           mb.push({
             x: cx + dirX * r,
             y,
             z: cz + dirZ * r,
-            nx: dirX,
+            nx: dirX - tanX * tilt,
             ny: 0.12,
-            nz: dirZ,
+            nz: dirZ - tanZ * tilt,
             u,
             v: KIT_UV.shorts(0.3 + v * 0.7),
+            // Free at the hem: this is what carries the 80–160 ms lag and the
+            // single overshoot §3.5 and §9.2 ask for.
+            cloth: Math.pow(v, 1.35),
+            // The side seam occludes as well as creases; both go in here.
+            ao:
+              (0.82 - v * 0.05) *
+              foldShade(legFoldV, 0.38) *
+              (1 - 0.26 * Math.exp(-seamD * seamD)),
           }),
         );
       }
@@ -1622,10 +1816,146 @@ function buildKit(
         mb.quad(rows[vi][ui], rows[vi + 1][ui], rows[vi + 1][u2], rows[vi][u2]);
       }
     }
-    rimRow(mb, rows[legRings], around2, 0.007 * S, -0.013 * S, KIT_UV.shorts(0.985));
+    rimRow(mb, rows[legRings], around2, 0.007 * S, -0.013 * S, KIT_UV.shorts(0.985), 1, 0.7);
   }
 
   return mb.geometry(H);
+}
+
+// ---------------------------------------------------------------------------
+// Drape
+// ---------------------------------------------------------------------------
+
+interface Fold {
+  /** Azimuth of the crease at v = 0, in u units. */
+  u0: number;
+  /** How far it drifts around the garment as it descends. */
+  drift: number;
+  wander: number;
+  /** Half-width in u units. */
+  w: number;
+  /** Where along v it fades in and how strong it gets. */
+  lo: number;
+  gain: number;
+}
+
+/**
+ * A set of drape creases spread around a garment.
+ *
+ * Two properties are load-bearing and both come from how cloth actually
+ * buckles. A fold is a *crease with raised shoulders* — the cloth pinches
+ * inward on a line and stands proud either side of it — which is what gives it
+ * both a shading gradient and a displaced specular rather than just a dark
+ * stripe. And it *drifts* as it descends, because the surface it is wrapping
+ * changes girth; a feature whose minimum sits at a constant x on every row is
+ * printed piping, and that is exactly how round 0's only torso minimum was
+ * caught.
+ */
+function makeFolds(
+  count: number,
+  rng: () => number,
+  lo: number,
+  gain: number,
+  width: number,
+): Fold[] {
+  const out: Fold[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push({
+      u0: (i + 0.15 + rng() * 0.7) / count,
+      drift: (rng() - 0.5) * 0.16,
+      wander: 0.02 + rng() * 0.05,
+      w: width * (0.8 + rng() * 0.5),
+      lo: lo * (0.6 + rng() * 0.8),
+      gain: gain * (0.7 + rng() * 0.6),
+    });
+  }
+  return out;
+}
+
+/** Signed distance on the wrapped u axis, in (-0.5, 0.5]. */
+function wrapDelta(u: number, c: number): number {
+  let d = (u - c) % 1;
+  if (d > 0.5) d -= 1;
+  if (d < -0.5) d += 1;
+  return d;
+}
+
+/** Summed fold profile at (u, v), in units of the caller's fold depth. */
+function foldAt(folds: readonly Fold[], u: number, v: number): number {
+  let sum = 0;
+  for (const f of folds) {
+    const c = f.u0 + f.drift * v + f.wander * Math.sin(v * 5.1 + f.u0 * 19.7);
+    const t = wrapDelta(u, c) / f.w;
+    // Crease, then a shoulder either side of it two half-widths out.
+    const core = Math.exp(-t * t);
+    const lip = Math.exp(-(t - 2) * (t - 2)) + Math.exp(-(t + 2) * (t + 2));
+    const along = clamp01((v - f.lo) / 0.3);
+    sum += (-core + 0.42 * lip) * f.gain * (0.45 + 0.55 * along * along);
+  }
+  return sum;
+}
+
+/**
+ * ∂fold/∂u, so the fold gets a *normal* and not just a silhouette.
+ *
+ * This is the half of §3.4 that is easy to miss. A fold needs "a shading
+ * gradient AND a shifted specular"; displacing the vertex gives neither on its
+ * own, because the loft writes the smooth cylinder normal and the lighting
+ * never learns the surface turned. On a radial loft the tilt is exactly
+ * (∂r/∂θ)/r along the tangential direction, so it is one central difference per
+ * vertex rather than a `computeVertexNormals` pass whose winding we would have
+ * to trust.
+ */
+const FOLD_H = 0.002;
+function foldSlope(folds: readonly Fold[], u: number, v: number): number {
+  return (foldAt(folds, u + FOLD_H, v) - foldAt(folds, u - FOLD_H, v)) / (2 * FOLD_H);
+}
+
+/**
+ * The shading a crease carries, as a multiplier on the garment's vertex colour.
+ *
+ * This is the term that actually makes a fold read, and it is not the one you
+ * would reach for first. Displacing the surface and tilting its normal
+ * *tangentially* — which is what a vertical crease does — changes N·L by almost
+ * nothing when the key is overhead, because rotating a normal about the
+ * vertical axis leaves its vertical component alone. `players-r3` proved it:
+ * the geometry carried ±10–23 mm of crease and the torso still measured flat to
+ * ±5 sRGB across 260 px, with the only prominent minimum sitting on the printed
+ * side piping.
+ *
+ * What a crease actually does to an overhead-lit garment is *occlude* it: the
+ * cloth at the bottom of the fold sees a narrower wedge of the bank array than
+ * the cloth on the lips either side. So the fold field drives an occlusion term
+ * as well as the displacement, and the two together give §3.4's required
+ * "shading gradient AND a shifted specular" — the gradient from here, the
+ * specular shift from the tangential tilt, which the sheen lobe does respond to
+ * at grazing view angles.
+ */
+function foldShade(f: number, depth: number): number {
+  return 1 - depth * clamp01(-f) + depth * 0.35 * clamp01(f);
+}
+
+// Depths are set against a measurement, not by eye. In `players-r4` the
+// garment's own vertical falloff — 22% of vertex colour between chest and hem —
+// arrived as a 10% change on screen, because roughly half a lit jersey's
+// radiance comes from the sheen lobe and the IBL rather than from the diffuse
+// the vertex colour scales. A crease therefore needs about twice the vertex
+// depth of the contrast it is meant to show.
+
+
+/**
+ * Sky occlusion down a hanging garment.
+ *
+ * The banks are overhead, so what a point on a jersey sees of them is decided
+ * by how much of the upper hemisphere the shoulder shelf and the torso above it
+ * cut off — which grows monotonically as you descend. §1.2 states the result as
+ * a measurement: the hem must be 10–25% down on the chest. Round 0 had chest
+ * 144.2 and waist 144.1, a 0.1% difference, because nothing in the garment
+ * carried an occlusion term at all.
+ */
+function skyAo(v: number, depth: number): number {
+  const t = v * v * (3 - 2 * v);
+  return 1 - depth * t;
 }
 
 /** Extrudes a boundary ring inward to give the cloth finite, bound thickness. */
@@ -1636,6 +1966,8 @@ function rimRow(
   inward: number,
   drop: number,
   vRow: number,
+  cloth = 0,
+  ao = 1,
 ): void {
   const inner: number[] = [];
   for (let ui = 0; ui < around; ui++) {
@@ -1654,6 +1986,8 @@ function rimRow(
         nz: -pz / len,
         u: ui / around,
         v: vRow,
+        cloth,
+        ao,
       }),
     );
   }
@@ -1746,24 +2080,47 @@ function buildShoes(
         // Boxy below (a sole is flat), rounded above (an upper is not).
         const e = sn > 0 ? 2.5 : 6.0;
         const k = Math.pow(Math.pow(Math.abs(cs), e) + Math.pow(Math.abs(sn), e), -1 / e);
-        const lx = cs * k * hw;
         const ly = midY + sn * k * halfH;
-        const yFrac = (ly - soleY) / (topY - soleY || 1);
+        // Height above the ground *in metres*, not as a fraction of the shoe.
+        // §3.6 puts the midsole at 28–38 mm; round 0 called the bottom 62% of
+        // the shoe "midsole", which on a 133 mm-tall last is 82 mm, so the
+        // bright outsole edge line landed halfway up the shoe and the knit
+        // upper was squeezed into the top 18%. At FLOOR framing (133 px/m) the
+        // whole thing collapsed into §10 tell 26's single blob.
+        const yAbs = ly - soleY;
+        const midsoleH = 0.032 * S;
+        const overlayH = midsoleH + 0.030 * S;
+        // The sole is wider than the upper. That step is the shelf the outsole
+        // edge line lives on, and it is what makes a shoe read as a shoe at
+        // 10 px tall.
+        const flare = 1 + 0.075 * (1 - clamp01((yAbs - midsoleH * 0.55) / (midsoleH * 0.75)));
+        const lx = cs * k * hw * flare;
         let v: number;
         if (sn < -0.35) v = BAND.sole + 0.12 * 0.2;
-        else if (yFrac < 0.62) v = BAND.sole + (0.28 + 0.66 * (yFrac / 0.62)) * 0.2;
-        else if (t > 0.26 && t < 0.6 && Math.abs(cs) < 0.6 && sn > 0.4) v = BAND.lace;
-        else if (yFrac < 0.82) v = BAND.overlay;
+        else if (yAbs < midsoleH) v = BAND.sole + (0.28 + 0.72 * (yAbs / midsoleH)) * 0.2;
+        else if (t > 0.26 && t < 0.62 && Math.abs(cs) < 0.62 && sn > 0.35) v = BAND.lace;
+        else if (yAbs < overlayH) v = BAND.overlay;
         else v = BAND.knit;
         const p = origin
           .clone()
           .addScaledVector(fx, lx * sgn)
           .addScaledVector(fy, ly)
           .addScaledVector(fz, z * S);
+        // The superellipse's own gradient. Round 0 used `sn * (hw/halfH) * 0.4`,
+        // which at 45° round the last gives a normal 0.96 horizontal against
+        // the true 0.80 — so the whole upper answered the overhead banks as if
+        // it were a vertical wall, and a shoe whose albedo is 240/238/233
+        // rendered as a dark blob. That, not the texture, was most of §10 tell
+        // 26 here.
+        const gx = Math.sign(cs) * Math.pow(Math.abs(cs), e - 1) / hw;
+        const gy = Math.sign(sn) * Math.pow(Math.abs(sn), e - 1) / halfH;
+        // Toe and heel turn away along the last; the middle does not.
+        const endT = (t - 0.5) * 2;
         const nrm = new Vector3()
-          .addScaledVector(fx, cs * sgn)
-          .addScaledVector(fy, sn * (hw / halfH) * 0.4)
-          .addScaledVector(fz, (t - 0.5) * 0.4);
+          .addScaledVector(fx, gx * sgn)
+          .addScaledVector(fy, gy)
+          .addScaledVector(fz, Math.sign(endT) * endT * endT * 14)
+          .normalize();
         row.push(
           mb.push({
             x: p.x,
@@ -1922,11 +2279,19 @@ function buildHair(
         // Hairline: hair stops well short of the brow at the front and runs
         // to the equator at the nape. Anything that covers the forehead reads
         // as a helmet, which is the named tell for hair.
-        const limit = lerp(1.62, spec.hairline, clamp01(sz * 1.15));
+        //
+        // The hairline itself has to be irregular. A hairline that is an exact
+        // function of azimuth draws as a painted arc across the forehead — one
+        // of the two things the round-0 closeup was pulled up for — so it
+        // wanders, more on the outer shells than the inner, which is also how a
+        // real one looks.
+        const edge =
+          (fbm2(az * 2.6, s * 3.1 + 5, 3, 2.1, 0.55, seed + 41) - 0.5) * 0.16 * (0.4 + 0.6 * k);
+        const limit = lerp(1.62, spec.hairline, clamp01(sz * 1.15)) + edge;
         const cover = clamp01((limit - pol) / 0.2);
         // Outside the hairline the shell is tucked inside the skull rather
         // than left flat on the scalp, so no bald patch is ever drawn.
-        const grow = off * cover * (0.7 + 0.6 * rng()) - (1 - cover) * 0.014 * S;
+        const grow = off * cover * (0.45 + 1.1 * rng()) - (1 - cover) * 0.014 * S;
         const nl = Math.hypot(sx / rx, sy / ry, sz / rz) || 1;
         row.push(
           mb.push({
