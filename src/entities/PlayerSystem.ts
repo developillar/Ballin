@@ -339,6 +339,13 @@ export class PlayerSystem implements System {
 
   /** Index of the player currently in possession, or -1. */
   ballHandler = -1;
+
+  /**
+   * Where the ball is being carried this frame, when the control layer is
+   * driving it. Null means nobody has an opinion and the triple-threat hold in
+   * `resolveBallPoint` applies.
+   */
+  ballPointOverride: Vector3 | null = null;
   /** 0..1, rises over a possession and drives the sweat specular. */
   exertion = 0.45;
 
@@ -880,6 +887,12 @@ export class PlayerSystem implements System {
    * both hands onto this point, so the contact is exact rather than eyeballed.
    */
   private resolveBallPoint(p: PlayerRig, out: Vector3): Vector3 {
+    // Play decides where the ball is when it has an opinion — a dribble puts it
+    // on the floor and back, and the hands have to follow it there rather than
+    // the ball being welded to a static triple-threat point. Absent a
+    // controller, the hold below stands.
+    if (this.ballPointOverride) return out.copy(this.ballPointOverride);
+
     const s = p.dominantHand === 'left' ? -1 : 1;
     const cos = Math.cos(p.facing);
     const sin = Math.sin(p.facing);

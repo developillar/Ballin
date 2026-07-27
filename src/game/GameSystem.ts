@@ -35,6 +35,15 @@ export class GameSystem implements System {
   shotMeter = 0;
   shotCharging = false;
 
+  /**
+   * When a control layer is present it starts the jump-shot clip on release and
+   * calls `releaseShot` from the clip's own release frame, so the ball leaves
+   * the hand at the top of the motion rather than the instant the button comes
+   * up. Left false, this system fires the shot itself — which is what the
+   * screenshot harness relies on.
+   */
+  deferReleaseToAnimation = false;
+
   private ball: BallSystem | null = null;
 
   /**
@@ -175,21 +184,27 @@ export class GameSystem implements System {
     }
     if (shoot.released && this.shotCharging) {
       this.shotCharging = false;
-      this.releaseShot(engine, this.shotMeter);
+      if (!this.deferReleaseToAnimation) this.releaseShot(engine, this.shotMeter);
     }
   }
 
-  /** Fires a shot with a physically solved arc toward the target basket. */
-  releaseShot(engine: Engine, meter: number): void {
+  /**
+   * Fires a shot with a physically solved arc toward the target basket.
+   *
+   * `from` is the release point. A control layer passes the shooting hand's
+   * world position at the animation's release frame; without one the ball's own
+   * position stands in, which is what the harness uses.
+   */
+  releaseShot(engine: Engine, meter: number, from?: Vector3): void {
     if (!this.ball) return;
     const s = this.ball.ballState;
-    const from = s.position.clone();
+    const origin = from ? from.clone() : s.position.clone();
     const target = new Vector3(basketX(1), HOOP.rimHeight, 0);
 
     // Ideal release angle for the distance, then perturb by release timing.
-    const flat = new Vector3(target.x - from.x, 0, target.z - from.z);
+    const flat = new Vector3(target.x - origin.x, 0, target.z - origin.z);
     const d = flat.length();
-    const dy = target.y - from.y;
+    const dy = target.y - origin.y;
     const angle = Math.max(0.68, Math.min(1.15, 0.72 + d * 0.012));
     const g = 9.80665;
     const cos = Math.cos(angle);
@@ -218,7 +233,7 @@ export class GameSystem implements System {
 
     // Backspin: perpendicular to travel, in the horizontal plane.
     const spin = new Vector3(-flat.z, 0, flat.x).multiplyScalar(-34);
-    this.ball.launch(from, vel, spin, 0);
+    this.ball.launch(origin, vel, spin, 0);
     this.phase = 'shot';
 
     engine.bus.emit('shotReleased', {
