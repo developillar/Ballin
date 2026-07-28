@@ -775,7 +775,10 @@ function jumpShot(quality: number, hand: 'left' | 'right', variant: 'set' | 'fad
 
   const t = quick
     ? { gather: 0.06, dip: 0.16, drive: 0.28, set: 0.38, rel: 0.46, fol: 0.62, reach: 0.82, land: 0.92 }
-    : { gather: 0.09, dip: 0.23, drive: 0.35, set: 0.44, rel: 0.51, fol: 0.68, reach: 0.86, land: 0.94 };
+    // The gather→dip window is the anticipation §9.2 measures, and it wants
+    // 60–140 ms. At 1.08 s the old 0.09→0.23 spacing put it at 151 ms, which
+    // reads as a squat rather than a dip; 0.115→0.205 is 97 ms.
+    : { gather: 0.115, dip: 0.205, drive: 0.35, set: 0.44, rel: 0.51, fol: 0.68, reach: 0.86, land: 0.94 };
   // Feet leave the floor a touch after the drive and land just before `land`.
   const t0 = t.drive + 0.015;
   const t1 = t.reach + 0.04;

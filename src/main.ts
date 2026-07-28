@@ -8,6 +8,7 @@ import { BallSystem } from './physics/BallSystem';
 import { PlayerSystem } from './entities/PlayerSystem';
 import { GameSystem } from './game/GameSystem';
 import { PlayControlSystem } from './game/PlayControl';
+import { TeamAISystem } from './game/TeamAI';
 import { CameraSystem } from './render/CameraSystem';
 import { HudSystem } from './ui/HudSystem';
 import { AudioSystem } from './audio/AudioSystem';
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
     .add(new BallSystem())
     .add(new PlayerSystem())
     .add(new PlayControlSystem())
+    .add(new TeamAISystem())
     .add(new GameSystem())
     .add(new CameraSystem())
     .add(new VfxSystem())

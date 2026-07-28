@@ -2,10 +2,18 @@
  * The locomotion blend tree.
  *
  * One continuous parametric gait rather than a handful of clips with cross-
- * fades between them. Speed picks a pair of rungs on a ladder (walk → jog →
- * run → sprint) and blends them at a *shared phase*, so there is never a moment
- * where two cycles are fighting each other out of sync. Direction blends the
- * same way against a backpedal and a lateral shuffle.
+ * fades between them. Speed picks a pair of rungs on a ladder (idle → walk →
+ * jog → run → sprint) and blends them at a *shared phase*, so there is never a
+ * moment where two cycles are fighting each other out of sync. Direction blends
+ * the same way against a backpedal and a lateral shuffle.
+ *
+ * **Rung 0 is a standstill.** That is not a detail. The ladder used to start at
+ * the walk, so a player at 0 m/s selected the walk at full weight and reported
+ * `walk` as the clip it was playing while holding a frozen mid-stride pose; the
+ * idle was a special case bolted on underneath the ladder rather than a rung of
+ * it. Idle is not a *cycle* — it has its own clock and no stride — so it does
+ * not join the phase-locked pair, but it is a rung: it has a place on the speed
+ * axis, it owns the blend below `IDLE_TOP`, and it is what `dominant` reports.
  *
  * The important number in here is **stride length**. Each gait clip knows how
  * far the body travels in one cycle, measured from the forward kinematics of
@@ -41,6 +49,20 @@ export interface FootState {
 
 const REF_HEIGHT = 1.98;
 
+/**
+ * Ground speed (m/s at the reference height) at which the idle rung is fully
+ * out of the blend.
+ *
+ * Deliberately well below the walk's own reference speed of 1.35 m/s. A walk
+ * cycle blended at 40% amplitude is not a slower walk — the legs stop reaching
+ * as far as the phase says the feet are landing, and the plant IK has to spend
+ * the difference, which it spends on skating. Idle has to be gone before the
+ * stride becomes load-bearing.
+ */
+const IDLE_TOP = 0.86;
+/** Below this the player is standing, not creeping, and idle owns the pose. */
+const IDLE_FLOOR = 0.1;
+
 export class GaitBlender {
   /** Cycle phase; the left foot strikes at 0, the right at 0.5. */
   phase = 0;
@@ -52,6 +74,8 @@ export class GaitBlender {
   stanceFraction = 0.4;
   /** Name of the dominant rung, for debugging. */
   dominant = 'idle';
+  /** Weight the standstill rung currently carries, 0..1. Diagnostics. */
+  idleWeight = 1;
 
   readonly left: FootState = { contact: 1, stanceT: 0 };
   readonly right: FootState = { contact: 1, stanceT: 0.5 };
@@ -90,24 +114,45 @@ export class GaitBlender {
 
     if (input.defending) return this.updateDefensive(dt, input, speed, heightScale);
 
-    // --- Pick the two rungs and their weights ------------------------------
+    // --- Pick the rungs and their weights ----------------------------------
+    // Rung 0 is the standstill. Above `IDLE_TOP` it is out of the blend and the
+    // ladder is the old phase-locked pair; below it, the pair collapses onto the
+    // walk and `idleW` carries the rest.
     const gaits = LOCOMOTION.gaits;
+    const walkSpeed = gaits[0].refSpeed ?? 1.35;
     let hi = 0;
-    while (hi < gaits.length - 1 && (gaits[hi].refSpeed ?? 0) < selectSpeed) hi++;
-    const lo = Math.max(0, hi - 1);
-    const sLo = gaits[lo].refSpeed ?? 0;
-    const sHi = gaits[hi].refSpeed ?? 1;
-    const k = hi === lo ? 0 : clamp01((selectSpeed - sLo) / Math.max(0.001, sHi - sLo));
-    this.dominant = (k > 0.5 ? gaits[hi] : gaits[lo]).name;
+    let lo = 0;
+    let k = 0;
+    let idleW = 0;
+    if (selectSpeed < walkSpeed) {
+      idleW = 1 - smoothstep(clamp01((selectSpeed - IDLE_FLOOR) / (IDLE_TOP - IDLE_FLOOR)));
+      this.dominant = idleW > 0.5 ? LOCOMOTION.idle.name : gaits[0].name;
+    } else {
+      while (hi < gaits.length - 1 && (gaits[hi].refSpeed ?? 0) < selectSpeed) hi++;
+      lo = Math.max(0, hi - 1);
+      const sLo = gaits[lo].refSpeed ?? 0;
+      const sHi = gaits[hi].refSpeed ?? 1;
+      k = hi === lo ? 0 : clamp01((selectSpeed - sLo) / Math.max(0.001, sHi - sLo));
+      this.dominant = (k > 0.5 ? gaits[hi] : gaits[lo]).name;
+    }
+    this.idleWeight = idleW;
 
     const strideLo = gaits[lo].strideLength ?? 1;
     const strideHi = gaits[hi].strideLength ?? 1;
     const stanceLo = gaits[lo].stanceFraction ?? 0.4;
     const stanceHi = gaits[hi].stanceFraction ?? 0.4;
-    // Fatigue shortens the stride directly as well as biasing the rung.
-    const strideFrac = (strideLo + (strideHi - strideLo) * k) * (1 - fatigue * 0.12) * this.strideBias;
+    // Fatigue shortens the stride directly as well as biasing the rung. The idle
+    // rung contributes no leg swing at all, so the stride it is diluting shrinks
+    // with it — that is what keeps `cadence = speed / stride` honest and stops a
+    // creeping player playing a full walk stride at a rate his legs are not
+    // covering.
+    const strideFrac =
+      (strideLo + (strideHi - strideLo) * k) * (1 - idleW * 0.55) * (1 - fatigue * 0.12) * this.strideBias;
     this.stanceFraction = stanceLo + (stanceHi - stanceLo) * k;
-    this.strideMetres = Math.max(0.15, strideFrac * input.height);
+    // Floored well above zero: `cadence = speed / stride` runs away at a crawl,
+    // and a creeping player cycling his legs at 3 Hz is a worse artefact than a
+    // slightly long stride.
+    this.strideMetres = Math.max(0.38, strideFrac * input.height);
 
     // --- Advance the phase at exactly ground speed --------------------------
     this.prevPhase = this.phase;
@@ -145,13 +190,12 @@ export class GaitBlender {
       blendPose(this.a, this.a, this.b, latW * 0.85);
     }
 
-    // Idle. Below a walk the cycle has nothing to say, so fade into a settled
-    // standing pose rather than playing a walk at rate 0.
+    // Rung 0. Its own clock, not the stride phase — an idle is a slow settle,
+    // not a cycle whose rate means anything.
     this.idleTime += dt;
-    const moveW = smoothstep(clamp01((speed - 0.14) / 0.62));
-    if (moveW < 0.999) {
+    if (idleW > 0.001) {
       sampleClip(this.c, LOCOMOTION.idle, this.idleTime / LOCOMOTION.idle.duration);
-      blendPose(this.a, this.c, this.a, moveW);
+      blendPose(this.a, this.a, this.c, idleW);
     }
 
     // Airborne overrides everything below the waist.
@@ -170,6 +214,9 @@ export class GaitBlender {
   /** Defensive stance and slide share the same tree but a different rung set. */
   private updateDefensive(dt: number, input: GaitInput, speed: number, heightScale: number): Pose {
     this.dominant = speed > 0.4 ? 'slide' : 'stance';
+    // The defensive tree has its own standstill (`stance`), so the idle rung
+    // takes no weight here.
+    this.idleWeight = 0;
     const slide: Clip = this.smoothedDrift >= 0 ? LOCOMOTION.slideL : LOCOMOTION.slideR;
     this.strideMetres = Math.max(0.2, (slide.strideLength ?? 0.62) * input.height);
     this.stanceFraction = slide.stanceFraction ?? 0.55;
@@ -205,7 +252,13 @@ export class GaitBlender {
     // Standing still, *both* feet are on the floor. Leaving contact purely
     // phase-driven means a stationary player can sit at a phase where neither
     // foot is weighted, nothing is pinned, and the first step arrives as a pop.
-    const standing = 1 - smoothstep(clamp01((speed - 0.15) / 0.45));
+    //
+    // Gated on the *cadence*, not just the speed. A creeping player is slow but
+    // his legs are still cycling, and pinning a foot the clip is swinging is how
+    // you turn a 3 mm/frame plant into a 260 mm one — measured, at 0.3 m/s.
+    const standing =
+      (1 - smoothstep(clamp01((speed - 0.15) / 0.45))) *
+      (1 - smoothstep(clamp01((this.cadence - 0.15) / 0.35)));
     if (standing > 0.001) {
       for (const f of [this.left, this.right]) {
         f.contact = Math.max(f.contact, standing * grounded);

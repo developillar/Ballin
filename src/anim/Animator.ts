@@ -44,7 +44,7 @@ import {
 } from './Pose';
 import { solveBallHold, solveLegPlant, solveLookAt } from './IK';
 import { GaitBlender } from './Locomotion';
-import { SecondaryMotion, addBone } from './Secondary';
+import { SecondaryMotion, Spring, addBone, type MotionDrive } from './Secondary';
 import { clamp, clamp01, damp, makeRng, smootherstep, wrapAngle } from '../core/MathX';
 import type {
   ActionKind,
@@ -108,10 +108,42 @@ interface FootLock {
   /** Previous frame's solved ankle position, for the effector speed limit. */
   prevSolved: Vector3;
   prevValid: boolean;
+  /** Seconds since this foot left the floor, for the effector speed ramp. */
+  free: number;
 }
 
 /** Fraction of stance at which the heel lifts and the pivot moves to the toe. */
 const ROLL_START = 0.45;
+
+/**
+ * Actions whose shooting arm holds its follow-through after the ball has gone.
+ *
+ * Rubric §9.2: *"The shooting wrist must snap and hold — the hand stays in the
+ * follow-through pose for 250–500 ms."* Held here rather than in the clip
+ * because a jump shot's follow-through outlives the clip: the shooter is still
+ * hanging on the release when he lands, and the landing, the return to
+ * locomotion and the next dribble all have to happen underneath an arm that has
+ * not come down yet. A clip can only hold it until it ends.
+ *
+ * Values are `[snap, hold, fade]` in seconds. `snap` is how long after the
+ * release frame the pose is taken — the wrist is still snapping *at* release,
+ * and what a shooter holds is where the arm arrives a moment later. `hold` and
+ * `fade` run from there, so the arm is pinned for `snap + hold` and on its way
+ * back for `fade` after that.
+ */
+const FOLLOW_THROUGH: Partial<Record<ActionKind, [number, number, number]>> = {
+  shoot: [0.16, 0.26, 0.22],
+  jumpShot: [0.17, 0.28, 0.24],
+  fadeaway: [0.17, 0.28, 0.24],
+  floater: [0.14, 0.24, 0.2],
+  hookShot: [0.13, 0.22, 0.2],
+  fingerRoll: [0.1, 0.18, 0.18],
+  layup: [0.09, 0.14, 0.16],
+  pass: [0.07, 0.12, 0.14],
+  bouncePass: [0.07, 0.12, 0.14],
+  overheadPass: [0.08, 0.14, 0.14],
+  block: [0.09, 0.18, 0.18],
+};
 
 export class Animator implements IAnimator {
   readonly skeleton: BuiltSkeleton;
@@ -151,16 +183,36 @@ export class Animator implements IAnimator {
   private accel = 0;
   private turnRate = 0;
   private prevDrift = 0;
-  private leanPitch = 0;
-  private leanRoll = 0;
+  /** Trunk balance lean, as springs — a stop has to overshoot and settle. */
+  private readonly leanPitch = new Spring();
+  private readonly leanRoll = new Spring();
+  private readonly brakeDrop = new Spring();
   private dribblePhase = 0;
   private lift = 0;
   private lastPlantSide: 'left' | 'right' = 'right';
 
+  /** Real motion sampled off the rig, in body space, for the secondary layer. */
+  private readonly drive: MotionDrive = { accelForward: 0, accelSide: 0, turnRate: 0, accelUp: 0 };
+  private prevFacing = 0;
+  private prevRootY = 0;
+  private prevRootVy = 0;
+  private rigSampled = false;
+  private facingRate = 0;
+
+  /** Held follow-through: a pose snapshot over the shooting arm and its weight. */
+  private readonly followPose: Pose = makePose();
+  private readonly followMask: BoneMask;
+  private followWeight = 0;
+  private followHold = 0;
+  private followFade = 0.2;
+  private followSnap = -1;
+  private followArmed: ActionKind | null = null;
+  private followOwner: ActionKind | null = null;
+
   private readonly lockL: FootLock =
-    { active: false, point: new Vector3(), toe: new Vector3(), rolling: false, weight: 0, slip: 0, sole: 0, residual: new Vector3(), residualW: 0, prevSolved: new Vector3(), prevValid: false };
+    { active: false, point: new Vector3(), toe: new Vector3(), rolling: false, weight: 0, slip: 0, sole: 0, residual: new Vector3(), residualW: 0, prevSolved: new Vector3(), prevValid: false, free: 1 };
   private readonly lockR: FootLock =
-    { active: false, point: new Vector3(), toe: new Vector3(), rolling: false, weight: 0, slip: 0, sole: 0, residual: new Vector3(), residualW: 0, prevSolved: new Vector3(), prevValid: false };
+    { active: false, point: new Vector3(), toe: new Vector3(), rolling: false, weight: 0, slip: 0, sole: 0, residual: new Vector3(), residualW: 0, prevSolved: new Vector3(), prevValid: false, free: 1 };
 
   constructor(skeleton: BuiltSkeleton, options: AnimatorOptions) {
     this.skeleton = skeleton;
@@ -182,6 +234,14 @@ export class Animator implements IAnimator {
       this.dribbleMask[boneIndex(b)] = 1;
     }
     this.dribbleMask[boneIndex(`clavicle${side}`)] = 0.4;
+
+    // The follow-through owns the shooting arm and a little of the girdle it
+    // hangs off — never the trunk, which has a landing to get on with.
+    this.followMask = makeMask(0);
+    this.followMask[boneIndex(`upperArm${side}`)] = 1;
+    this.followMask[boneIndex(`foreArm${side}`)] = 1;
+    this.followMask[boneIndex(`hand${side}`)] = 1;
+    this.followMask[boneIndex(`clavicle${side}`)] = 0.55;
 
     this.action.onEvent = (name) => this.onActionEvent(name);
   }
@@ -235,6 +295,19 @@ export class Animator implements IAnimator {
     this.actionAuto = false;
     this.actionWeight = 0;
     this.actionElapsed = 0;
+    // A cancel cancels everything, the held arm included. Leaving `followOwner`
+    // set meant the next action inherited a hold it never armed and fought it
+    // out of the blend over its own ramp-in.
+    this.followSnap = -1;
+    this.followArmed = null;
+    this.followOwner = null;
+    this.followHold = 0;
+    this.followWeight = 0;
+  }
+
+  /** How much of the shooting arm the held follow-through still owns. Diagnostics. */
+  get followThrough(): number {
+    return this.followWeight;
   }
 
   /** A knock from a defender, a screen, a box-out. `dir` is world space. */
@@ -262,7 +335,17 @@ export class Animator implements IAnimator {
   private onActionEvent(name: string): void {
     const kind = this.actionKind;
     if (!kind) return;
-    if (name === 'release') this.events.onRelease?.(kind);
+    if (name === 'release') {
+      // Arm the hold. The pose that gets frozen is not the release pose — the
+      // wrist is still snapping there — but the one a moment later, which is the
+      // one a shooter actually holds.
+      const spec = FOLLOW_THROUGH[kind];
+      if (spec) {
+        this.followArmed = kind;
+        this.followSnap = spec[0];
+      }
+      this.events.onRelease?.(kind);
+    }
     else if (name === 'apex') this.events.onApex?.(kind);
     else if (name === 'land') {
       this.events.onLand?.(kind);
@@ -282,9 +365,19 @@ export class Animator implements IAnimator {
     this.smoothedSpeed = damp(this.smoothedSpeed, loco.speed, 12, step);
     const rawAccel = (this.smoothedSpeed - prevSpeed) / step;
     this.accel = damp(this.accel, clamp(rawAccel, -40, 40), 10, step);
+    this.sampleRig(step);
+    // `driftAngle` is the heading *relative to facing*; the facing itself turns
+    // too, and for a player who always faces where he is going that is the whole
+    // of the turn. Reading it off the rig rather than trusting the intent is the
+    // difference between banking into every arc and banking into none of them.
     const dDrift = wrapAngle(loco.driftAngle - this.prevDrift) / step;
     this.prevDrift = loco.driftAngle;
-    this.turnRate = damp(this.turnRate, clamp(dDrift, -12, 12), 8, step);
+    this.turnRate = damp(this.turnRate, clamp(dDrift + this.facingRate, -12, 12), 8, step);
+    this.drive.accelForward = this.accel;
+    this.drive.turnRate = this.turnRate;
+    // Centripetal: turning right accelerates the body to its right, which is
+    // negative on an axis that calls the character's left positive.
+    this.drive.accelSide = clamp(-this.smoothedSpeed * this.turnRate, -30, 30);
 
     this.maybeAutoTransition(step);
 
@@ -347,15 +440,105 @@ export class Animator implements IAnimator {
     }
 
     // --- 5. Secondary motion ----------------------------------------------
-    const sec = this.secondary.update(step, this.smoothedSpeed, loco.fatigue, this.actionWeight);
+    const sec = this.secondary.update(
+      step,
+      this.smoothedSpeed,
+      loco.fatigue,
+      Math.max(this.actionWeight, this.followWeight * 0.4),
+      this.drive,
+    );
     addPose(this.finalPose, this.finalPose, sec, 1);
+
+    // --- 6. Held follow-through -------------------------------------------
+    this.updateFollowThrough(step);
 
     this.lift = this.finalPose.rootOffset.y;
     applyPose(this.skeleton, this.finalPose);
     this.applyIk(step);
   }
 
+  /**
+   * Freezes the shooting arm on its follow-through and lets go of it slowly.
+   *
+   * The arm is held in *local* space, so it stays put relative to the chest
+   * while the body lands and turns underneath it — which is what a held
+   * follow-through looks like. Snapshotting the composed pose rather than
+   * re-sampling the clip means the hold picks up whatever the shot actually
+   * ended on, including the secondary layer, so there is nothing to pop out of.
+   */
+  private updateFollowThrough(dt: number): void {
+    if (this.followSnap >= 0) {
+      this.followSnap -= dt;
+      if (this.followSnap <= 0) {
+        const kind = this.followArmed;
+        const spec = (kind && FOLLOW_THROUGH[kind]) || null;
+        this.followSnap = -1;
+        this.followArmed = null;
+        if (spec) {
+          copyPose(this.followPose, this.finalPose);
+          this.followWeight = 1;
+          this.followHold = spec[1];
+          this.followFade = Math.max(0.05, spec[2]);
+          this.followOwner = kind;
+        }
+      }
+    }
+    if (this.followWeight <= 0.0001) {
+      this.followWeight = 0;
+      this.followOwner = null;
+      return;
+    }
+    if (this.followHold > 0) this.followHold -= dt;
+    else this.followWeight = Math.max(0, this.followWeight - dt / this.followFade);
+    // A *different* action re-owns the arm immediately — a shooter who gets
+    // fouled and has to gather again does not finish the follow-through first.
+    // The shot that armed the hold is exempt: it is still running underneath,
+    // and holding the arm through its own tail is the whole point.
+    if (this.actionKind && this.actionKind !== this.followOwner && this.actionWeight > 0.25) {
+      this.followWeight = Math.min(this.followWeight, 1 - this.actionWeight);
+      this.followHold = 0;
+    }
+    const w = smootherstep(clamp01(this.followWeight));
+    if (w > 0.0001) blendPoseMasked(this.finalPose, this.finalPose, this.followPose, w, this.followMask, 0);
+  }
+
   // -------------------------------------------------------------------------
+
+  /**
+   * Samples what the rig is *actually* doing, in its own frame.
+   *
+   * Gameplay states `speed` and (today) a `driftAngle` of zero, so anything
+   * derived from intent alone thinks nobody ever turns. The rig's world matrix
+   * is current by the time this runs — `PlayerSystem` sets the root transform
+   * before calling `update` — so the yaw rate and the pelvis's vertical
+   * acceleration can just be read off it.
+   */
+  private sampleRig(dt: number): void {
+    const root = this.skeleton.byName.root;
+    root.updateWorldMatrix(true, false);
+    root.getWorldQuaternion(_quat);
+    _fwd.set(0, 0, 1).applyQuaternion(_quat);
+    const facing = Math.atan2(_fwd.x, _fwd.z);
+    const y = _tmp.setFromMatrixPosition(root.matrixWorld).y;
+
+    if (!this.rigSampled) {
+      this.rigSampled = true;
+      this.prevFacing = facing;
+      this.prevRootY = y;
+      this.facingRate = 0;
+      this.drive.accelUp = 0;
+      return;
+    }
+    const rate = wrapAngle(facing - this.prevFacing) / dt;
+    this.prevFacing = facing;
+    this.facingRate = damp(this.facingRate, clamp(rate, -14, 14), 12, dt);
+
+    const vy = (y - this.prevRootY) / dt;
+    this.prevRootY = y;
+    const ay = (vy - this.prevRootVy) / dt;
+    this.prevRootVy = vy;
+    this.drive.accelUp = damp(this.drive.accelUp, clamp(ay, -60, 60), 16, dt);
+  }
 
   /**
    * Trunk attitude from momentum. A body accelerating at `a` has to lean by
@@ -363,6 +546,12 @@ export class Animator implements IAnimator {
    * same relation run backwards is what makes a hard stop rock the chest back.
    * Deriving it rather than authoring it means every speed change gets the
    * right amount of lean for free.
+   *
+   * The trunk chases that angle on a **spring**, not an exponential decay. A
+   * decay can only ever approach the target from one side, so a player braking
+   * from 7 m/s rocked back and then crept monotonically upright — measured, and
+   * exactly the "no overshoot on stops" §9.2 calls out. Under-damped at ζ = 0.58
+   * the same stop rocks back, comes past vertical and settles.
    */
   private buildMomentum(dt: number, loco: LocomotionIntent): void {
     const airborne = clamp01(loco.airborne);
@@ -370,12 +559,10 @@ export class Animator implements IAnimator {
     // Banking into a turn: the faster and tighter the arc, the more roll.
     const bank = clamp(this.turnRate * this.smoothedSpeed / (GRAVITY * 2.4), -0.3, 0.3);
     const wantRoll = clamp(bank + loco.lean * 0.22, -0.34, 0.34) * (1 - airborne);
-    this.leanPitch = damp(this.leanPitch, wantPitch, 7, dt);
-    this.leanRoll = damp(this.leanRoll, wantRoll, 6, dt);
+    const p = clamp(this.leanPitch.step(dt, wantPitch, 1.15, 0.58), -0.6, 0.66);
+    const r = clamp(this.leanRoll.step(dt, wantRoll, 1.0, 0.62), -0.48, 0.48);
 
     identityPose(this.momentum);
-    const p = this.leanPitch;
-    const r = this.leanRoll;
     if (Math.abs(p) > 1e-4 || Math.abs(r) > 1e-4) {
       // The pelvis takes a little, the spine most of it, and the head undoes
       // enough of it that the eyes stay on the play.
@@ -386,9 +573,11 @@ export class Animator implements IAnimator {
       addBone(this.momentum, 'neck', -p * 0.3, 0, -r * 0.3);
       addBone(this.momentum, 'head', -p * 0.42, 0, -r * 0.42);
     }
-    // Deceleration also drops the hips — you cannot stop standing tall.
-    const brake = clamp01(-this.accel / 22) * (1 - airborne);
-    this.momentum.rootOffset.y -= brake * 0.06 * this.skeleton.height / 1.98;
+    // Deceleration also drops the hips — you cannot stop standing tall. Sprung
+    // as well, so the body rises back through its standing height and settles
+    // rather than sliding up to it.
+    const brake = this.brakeDrop.step(dt, clamp01(-this.accel / 22) * (1 - airborne), 1.5, 0.5);
+    this.momentum.rootOffset.y -= clamp(brake, -0.4, 1.3) * 0.06 * this.skeleton.height / 1.98;
   }
 
   /**
@@ -458,8 +647,10 @@ export class Animator implements IAnimator {
       this.plantLeg('legR', this.lockR, R.contact * lockScale, R.stanceT, ik.floorY, dt);
     }
 
-    // Ball hold — skipped while an action clip is driving the arms.
-    if (ik.ball?.active && this.actionWeight < 0.4) {
+    // Ball hold — skipped while an action clip is driving the arms, and while a
+    // follow-through is still holding one of them. Grabbing the shooting hand
+    // back onto the ball the frame the clip ends is exactly the snap §9.2 bans.
+    if (ik.ball?.active && this.actionWeight < 0.4 && this.followWeight < 0.35) {
       const shootIsLeft = this.opts.dominantHand === 'left';
       const shoot = shootIsLeft ? CHAINS.armL : CHAINS.armR;
       const guide = shootIsLeft ? CHAINS.armR : CHAINS.armL;
@@ -517,22 +708,34 @@ export class Animator implements IAnimator {
     const groundY = floorY + ankleHeight;
     const legLen = (LANDMARK.thigh + LANDMARK.shin) * sk.height;
 
-    // Asymmetric. Loading has to be near-instant or the foot slips through the
-    // part of stance that matters most; unloading has to be slow, because
-    // dropping the IK correction the frame contact ends snaps the leg back to
-    // the raw clip pose — an unmistakable pop right at toe-off.
+    // Asymmetric, and the loading side is *exact*, not fast. `damp(…, 60, dt)`
+    // still leaves the lock at 0.63 on the first frame of contact and 0.86 on
+    // the second, and the plant is blended toward the pin by that weight — so
+    // the two frames where the foot is coming down under load were the two
+    // frames it slid furthest. Measured at 5 m/s: 27 mm on the entry frame
+    // against 0.5–4 mm for the rest of stance. Take the weight instantly on the
+    // way up; unloading stays slow, because dropping the IK correction the frame
+    // contact ends snaps the leg back to the raw clip pose — an unmistakable pop
+    // right at toe-off.
     const want = clamp01(contact);
-    lock.weight = damp(lock.weight, want, 60, dt);
+    lock.weight = want > lock.weight ? want : damp(lock.weight, want, 60, dt);
+    lock.free = lock.active ? 0 : lock.free + dt;
 
     if (contact > 0.02) {
       if (!lock.active) {
         lock.active = true;
         lock.rolling = false;
+        lock.free = 0;
         lock.point.copy(_ankle);
         lock.point.y = groundY;
         // A fresh plant must not be velocity-limited against the *previous*
-        // stance's foot position, which is a whole stride behind.
-        lock.prevValid = false;
+        // stance's foot position, which is a whole stride behind — but it must
+        // still be limited against *this* foot's position, or the first solve
+        // after a capture is unbounded. A full-body override (a hook shot, a
+        // dunk) hands the legs back wherever it left them, and an unbounded
+        // first correction there measured 158° of thigh rotation in one frame.
+        lock.prevSolved.copy(_ankle);
+        lock.prevValid = true;
       }
       // Release rather than stretch: past this the leg would visibly straighten
       // and snap, which is worse than a few millimetres of slip. Only the ankle
@@ -601,6 +804,10 @@ export class Animator implements IAnimator {
         foot.updateWorldMatrix(true, false);
         _ankle.setFromMatrixPosition(foot.matrixWorld);
         _target.copy(_ankle).add(lock.toe).sub(_toe);
+        // Weight only the first sweep. Weighting all three lets the pin slide
+        // back toward the clip through the whole unload, which measured 3× the
+        // in-stance drift — the release is smoothed by the effector ceiling
+        // below instead, which costs nothing while the foot is down.
         if (i === 0) _target.lerpVectors(_ankle, _target, w);
       } else if (i === 0 && w < 1) {
         _target.lerpVectors(_ankle, _target, w);
@@ -611,10 +818,15 @@ export class Animator implements IAnimator {
       // than a few degrees between frames — rubric §9.2 caps that at 35°.
       if (i === 0 && lock.prevValid) {
         // A planted foot is nearly stationary in world space; a releasing one is
-        // already accelerating into its swing and legitimately moves at twice
-        // body speed, so it gets a much looser ceiling.
+        // accelerating into its swing and does legitimately reach twice body
+        // speed — but not on the frame it leaves the floor. Switching the
+        // ceiling from 3.6 to 13 m/s the instant contact ended let the handover
+        // from the toe pin back to the clip arrive as a single ~100 mm step at a
+        // walk. Ramping it over 120 ms instead spreads that across the first few
+        // frames of swing, where the foot is genuinely picking up speed anyway.
         const step = _target.distanceTo(lock.prevSolved);
-        const maxStep = (lock.active ? 3.6 : 13) * dt * (sk.height / 1.98);
+        const ceiling = lock.active ? 3.6 : Math.min(13, 2.5 + lock.free * 88);
+        const maxStep = ceiling * dt * (sk.height / 1.98);
         if (step > maxStep) _target.lerpVectors(lock.prevSolved, _target, maxStep / step);
       }
       solveLegPlant(
