@@ -153,6 +153,8 @@ const CLOTH_ZETA = 0.42;
 /** Metres of hem displacement per m/s of body speed, and the ceiling on it. */
 const CLOTH_DRAG = 0.028;
 const CLOTH_MAX = 0.036;
+/** Hard ceiling on hem twist, radians. About 13 degrees of lag through a turn. */
+const CLOTH_TWIST_MAX = 0.23;
 
 /** A build. Radii, limb ratios and hair all move together. */
 interface Archetype {
@@ -791,10 +793,24 @@ export class PlayerSystem implements System {
 
     const k = CLOTH_OMEGA * CLOTH_OMEGA;
     const d = 2 * CLOTH_ZETA * CLOTH_OMEGA;
-    c.vel.x += ((tx - c.pos.x) * k - c.vel.x * d) * dt;
-    c.vel.y += ((ty - c.pos.y) * k - c.vel.y * d) * dt;
-    c.vel.z += ((tz - c.pos.z) * k - c.vel.z * d) * dt;
-    c.pos.addScaledVector(c.vel, dt);
+
+    // Sub-step the spring.
+    //
+    // This is explicit Euler, which for a spring of frequency w is only stable
+    // while dt < 2/w. At w = 18 that ceiling is 111 ms and the engine clamps dt
+    // to 100 ms, so a single slow frame lands right on the edge and the
+    // integrator runs away. It never showed until players started moving,
+    // because a rig at zero velocity has a target of zero and a spring already
+    // at rest has nothing to diverge from.
+    const maxStep = 1 / 120;
+    const steps = Math.max(1, Math.ceil(dt / maxStep));
+    const h = dt / steps;
+    for (let i = 0; i < steps; i++) {
+      c.vel.x += ((tx - c.pos.x) * k - c.vel.x * d) * h;
+      c.vel.y += ((ty - c.pos.y) * k - c.vel.y * d) * h;
+      c.vel.z += ((tz - c.pos.z) * k - c.vel.z * d) * h;
+      c.pos.addScaledVector(c.vel, h);
+    }
     if (c.pos.lengthSq() > CLOTH_MAX * CLOTH_MAX) c.pos.setLength(CLOTH_MAX);
 
     // Torsional lag: a hem does not follow a turn instantly either.
@@ -804,8 +820,18 @@ export class PlayerSystem implements System {
     c.lastFacing = p.facing;
     const yawRate = dt > 1e-5 ? dyaw / dt : 0;
     const twistTarget = Math.max(-0.16, Math.min(0.16, -yawRate * 0.05));
-    c.twistVel += ((twistTarget - c.twist) * k - c.twistVel * d) * dt;
-    c.twist += c.twistVel * dt;
+    for (let i = 0; i < steps; i++) {
+      c.twistVel += ((twistTarget - c.twist) * k - c.twistVel * d) * h;
+      c.twist += c.twistVel * h;
+    }
+    // The swing above is length-clamped; this was not, so where swing merely
+    // saturated, twist grew without bound and sheared the kit into flat sheets.
+    // A hem lags a turn by a few degrees, never by a rotation.
+    c.twist = Math.max(-CLOTH_TWIST_MAX, Math.min(CLOTH_TWIST_MAX, c.twist));
+    if (!Number.isFinite(c.twist)) {
+      c.twist = 0;
+      c.twistVel = 0;
+    }
 
     const kit = p.kitMaterial;
     if (kit) {
