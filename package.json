@@ -1,0 +1,30 @@
+{
+  "name": "ballin",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Ballin — a AAA-quality mobile basketball game built on Three.js, optimized for portrait play.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173 --host",
+    "typecheck": "tsc --noEmit",
+    "shot": "node tools/shot.mjs",
+    "capture": "node tools/capture.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:41729/git/developillar/Ballin"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.1",
+    "playwright": "^1.56.1",
+    "terser": "^5.49.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.5"
+  }
+}
